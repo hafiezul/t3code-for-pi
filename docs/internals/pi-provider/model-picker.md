@@ -17,7 +17,7 @@ This is the contract the Pi driver's model probe and the picker follow. It mirro
 
 Shape: `checkPiProviderStatus(settings, cwd, env)`, following `checkOpenCodeProviderStatus` in `apps/server/src/provider/Layers/OpenCodeProvider.ts`.
 
-1. **Version**: spawn `pi --version` (same `--version` flag as opencode), parse with `parseGenericCliVersion`. Gate on a `MINIMUM_PI_VERSION` constant — the _value_ is decided by ticket #45 (install/version/launch surface); the probe just enforces it. Too old → `status: "error"`, message mirrors opencode's "is too old" wording.
+1. **Version**: spawn `pi --version` (same `--version` flag as opencode), parse with `parseGenericCliVersion`. Gate on `MINIMUM_PI_VERSION = 0.80.4` (decided in ticket #45). Too old → `status: "error"`, message mirrors opencode's "is too old" wording.
 2. **Inventory**: spawn `pi --list-models` via `spawnAndCollect` with the instance env (ambient env + per-instance key env vars; `~/.pi` config is inherited). Parse stdout lines matching the 6-token shape (skip the `provider` header row; skip non-matching lines defensively). Parse `thinking` as `yes`/`no`; ignore `context`, `max-out`, `images` (see Picker metadata).
 3. **Missing binary**: ENOENT/`not found` failure → `installed: false`, `status: "error"`, message "Pi CLI (`pi`) is not installed or not on PATH." (opencode's `formatOpenCodeProbeError` pattern).
 4. **Auth/status**: pi gives no auth signal in the table. ≥1 model → `status: "ready"`, `auth: { status: "unknown" }` (the auth probe design is ticket #47's). 0 models → `status: "warning"` with a message pointing at `~/.pi/agent/models.json` auth, mirroring opencode's "no connected upstream providers" wording.
@@ -48,7 +48,7 @@ The picker itself needs no changes: `getAppModelOptionsForInstance` → `sortMod
 
 ## Selection → spawn
 
-- Fresh spawn: `--model <slug>` verbatim (e.g. `pi --mode rpc --model anthropic/claude-sonnet-5`). No `--provider` derivation needed — `provider/id` patterns are self-sufficient.
+- Fresh spawn: `--model <slug>` verbatim (e.g. `pi --mode rpc --model anthropic/claude-sonnet-5`). `provider/id` patterns are self-sufficient, so no provider flag is _derived_; per #45's launch contract the spawn also passes `--provider` when the instance config declares one (the case for bare model ids).
 - Thinking: if ticket #47 lands a thinking selector in v1, the level flows `modelSelection.options` → adapter → `--model <slug>:<level>` or `--thinking <level>` (both are valid pi; the choice of mechanism and where the control lives is #47's). The contract fixed here: **the slug is always exactly `provider/model`, the level is always separate**.
 - Mid-thread change: T3 sends `modelSelection` per turn; the adapter routes a model switch through the RPC `set_model { provider, modelId }` — a pure first-`/` split of the same slug, lossless even for model ids containing `/`. Fresh sessions that never switch just carry the `--model` spawn arg.
 
