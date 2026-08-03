@@ -447,17 +447,11 @@ export function mapPiEvent(
     }
 
     case "tool_execution_update": {
-      return [
-        {
-          ...base,
-          itemId: typeof event.toolCallId === "string" ? event.toolCallId : undefined,
-          type: "item.updated",
-          payload: {
-            itemType: piToolItemType(typeof event.toolName === "string" ? event.toolName : "tool"),
-            data: event,
-          },
-        },
-      ];
+      // pi's update events carry only toolCallId/toolName/args — the same
+      // fields the start event already delivered, with no progress payload.
+      // The item lifecycle is start → completed; emitting item.updated here
+      // would spam the work log with empty "Tool updated" rows (#50).
+      return [];
     }
 
     case "tool_execution_end": {
