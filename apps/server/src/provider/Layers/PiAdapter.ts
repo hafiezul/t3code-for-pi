@@ -303,6 +303,11 @@ export function mapPiEvent(
 
     case "message_start": {
       const message = (event.message ?? {}) as Record<string, unknown>;
+      // Only assistant-role messages become timeline items (user echoes and
+      // toolResult messages are owned by their tool items).
+      if (message.role !== "assistant") {
+        return [];
+      }
       return [
         {
           ...base,
@@ -321,6 +326,9 @@ export function mapPiEvent(
 
     case "message_end": {
       const message = (event.message ?? {}) as Record<string, unknown>;
+      if (message.role !== "assistant") {
+        return [];
+      }
       return [
         {
           ...base,
@@ -339,6 +347,11 @@ export function mapPiEvent(
 
     case "message_update": {
       const assistantEvent = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      // Deltas outside an assistant-role message (toolResult echoes, user
+      // echoes) have no timeline item to attach to.
+      if (input.messageItemId === undefined) {
+        return [];
+      }
       if (!assistantEvent || typeof assistantEvent.type !== "string") {
         return [];
       }
@@ -910,8 +923,18 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
     if (event.type === "message_start") {
       // pi messages carry no ids of their own; mint one so message_start →
       // message_end items correlate as one T3 item. The id stays until the
-      // next message_start overwrites it.
-      context.currentMessageItemId = yield* randomUUIDv4;
+      // next message_start overwrites it. Only assistant-role messages become
+      // timeline items: user echoes and `role: "toolResult"` messages (tool
+      // outputs) belong to the tool item the `tool_execution_*` events own.
+      const role =
+        event.message !== null && typeof event.message === "object"
+          ? (event.message as Record<string, unknown>).role
+          : undefined;
+      if (role !== "assistant") {
+        context.currentMessageItemId = undefined;
+      } else {
+        context.currentMessageItemId = yield* randomUUIDv4;
+      }
     }
 
     if (event.type === "agent_settled") {

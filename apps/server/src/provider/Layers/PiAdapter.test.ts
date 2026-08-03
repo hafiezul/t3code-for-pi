@@ -249,7 +249,7 @@ describe("mapPiEvent", () => {
   const baseInput = {
     threadId,
     activeTurnId: turnId("pi-turn-1"),
-    messageItemId: undefined,
+    messageItemId: "item-1",
     suppressSettled: false,
   };
 
@@ -265,10 +265,50 @@ describe("mapPiEvent", () => {
     expect(mapped).toEqual([
       {
         turnId: "pi-turn-1",
+        itemId: "item-1",
         type: "content.delta",
         payload: { streamKind: "assistant_text", delta: "Hello " },
       },
     ]);
+  });
+
+  it("drops deltas that arrive outside an assistant-role message", () => {
+    expect(
+      mapPiEvent(
+        {
+          type: "message_update",
+          message: {},
+          assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hello " },
+        },
+        { ...baseInput, messageItemId: undefined },
+      ),
+    ).toEqual([]);
+  });
+
+  it("skips user echoes and toolResult messages", () => {
+    for (const role of ["user", "toolResult"]) {
+      expect(
+        mapPiEvent(
+          {
+            type: "message_start",
+            message: {
+              role,
+              content: [{ type: "text", text: "ls output or user text" }],
+            },
+          },
+          baseInput,
+        ),
+      ).toEqual([]);
+      expect(
+        mapPiEvent(
+          {
+            type: "message_end",
+            message: { role, content: [{ type: "text", text: "ls output or user text" }] },
+          },
+          baseInput,
+        ),
+      ).toEqual([]);
+    }
   });
 
   it("maps thinking deltas to reasoning_text content deltas", () => {
@@ -282,6 +322,7 @@ describe("mapPiEvent", () => {
     expect(mapped).toEqual([
       {
         turnId: "pi-turn-1",
+        itemId: "item-1",
         type: "content.delta",
         payload: { streamKind: "reasoning_text", delta: "hmm" },
       },
