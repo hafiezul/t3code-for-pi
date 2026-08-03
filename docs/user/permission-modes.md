@@ -44,5 +44,8 @@ with prompting enabled and a restricted workspace while **Full access** disables
 labels above describe what you get; the exact per-provider translation is internal and may
 change.
 
+Pi has no approval prompts at all, so Pi threads always run in **Full access** regardless of the
+selected mode — see [Pi](./providers-pi.md#permissions).
+
 Mobile offers the same four modes. It labels the first one **Approve actions** rather than
 **Supervised**.

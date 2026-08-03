@@ -1,7 +1,8 @@
 # Claude
 
 This guide is for people who want to use more than one Claude setup in T3 Code. For Codex, see
-[Codex](./providers-codex.md). For first-time setup, see [Install T3 Code](./install.md).
+[Codex](./providers-codex.md). For Pi, see [Pi](./providers-pi.md). For first-time setup, see
+[Install T3 Code](./install.md).
 
 Common reasons:
 

@@ -37,6 +37,30 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("derives the Pi provider fields from the client definition schema", () => {
+    const pi = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("pi")];
+
+    expect(pi).toBeDefined();
+    expect(deriveProviderSettingsFields(pi!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "launchArgs",
+      "anthropicApiKey",
+      "openaiApiKey",
+      "geminiApiKey",
+      "groqApiKey",
+      "xaiApiKey",
+    ]);
+
+    const anthropicApiKey = deriveProviderSettingsFields(pi!).find(
+      (field) => field.key === "anthropicApiKey",
+    );
+    expect(anthropicApiKey).toMatchObject({
+      label: "Anthropic API key",
+      description: "Injected as ANTHROPIC_API_KEY for pi sessions.",
+      control: "password",
+    });
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();
