@@ -94,7 +94,19 @@ describe("parsePiModelTable", () => {
     expect(models[1]).toMatchObject({
       slug: "anthropic/claude-sonnet-4-6",
       capabilities: {
-        optionDescriptors: [{ id: "thinking", label: "Thinking", type: "boolean" }],
+        optionDescriptors: [
+          {
+            id: "thinkingLevel",
+            label: "Thinking",
+            type: "select",
+            options: expect.arrayContaining([
+              { id: "off", label: "Off" },
+              { id: "low", label: "Low" },
+              { id: "high", label: "High" },
+              { id: "max", label: "Max" },
+            ]),
+          },
+        ],
       },
     });
   });

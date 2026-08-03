@@ -11,7 +11,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { createModelCapabilities } from "@t3tools/shared/model";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
-  buildBooleanOptionDescriptor,
+  buildSelectOptionDescriptor,
   buildServerProvider,
   isCommandMissingCause,
   parseGenericCliVersion,
@@ -79,11 +79,30 @@ export function parsePiModelTable(stdout: string): ReadonlyArray<PiModelTableRow
 }
 
 /**
+ * pi's universal thinking levels (`--thinking`). Models map unsupported
+ * levels to their nearest supported one (pi clamps, e.g. `low` → `high` on
+ * models whose `thinkingLevelMap` has no low tier), so the full set is safe
+ * to offer. A picked level is applied at session spawn; pi's own default
+ * applies when nothing is selected.
+ */
+const PI_THINKING_LEVELS: ReadonlyArray<{ value: string; label: string }> = [
+  { value: "off", label: "Off" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "XHigh" },
+  { value: "max", label: "Max" },
+];
+
+/**
  * Flatten `pi --list-models` rows into `ServerProviderModel`s. Slug is
  * `<provider>/<model>` split at the FIRST `/` only (model ids may contain
  * slashes, e.g. `@cf/moonshotai/kimi-k2.6`); name = model id (pi has no
- * display-name column); only the `thinking` column survives as a boolean
- * option descriptor (the Claude `claude-haiku-4-5` convention).
+ * display-name column); the `thinking` column becomes a thinking-level
+ * select descriptor (the model's available tiers are per-model and only
+ * visible through a live session, so the probe offers pi's universal set
+ * and pi clamps per model).
  */
 export function flattenPiModels(
   rows: ReadonlyArray<PiModelTableRow>,
@@ -97,7 +116,13 @@ export function flattenPiModels(
         isCustom: false,
         capabilities: createModelCapabilities({
           optionDescriptors: row.thinking
-            ? [buildBooleanOptionDescriptor({ id: "thinking", label: "Thinking" })]
+            ? [
+                buildSelectOptionDescriptor({
+                  id: "thinkingLevel",
+                  label: "Thinking",
+                  options: PI_THINKING_LEVELS,
+                }),
+              ]
             : [],
         }),
       }),

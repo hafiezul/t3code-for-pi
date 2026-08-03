@@ -67,6 +67,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { tokenizeCliArgs } from "@t3tools/shared/cliArgs";
+import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -116,6 +117,8 @@ export const resolvePiLaunchArgs = (input: {
   readonly resumeCursor: PiResumeCursor | undefined;
   readonly model: string | undefined;
   readonly launchArgs: string;
+  /** Picked thinking tier (`off|minimal|low|medium|high|xhigh|max`); absent leaves pi's default. */
+  readonly thinkingLevel?: string | undefined;
 }): ReadonlyArray<string> => {
   const args = ["--mode", "rpc", "--session-dir", input.sessionDir];
   const cursor = input.resumeCursor;
@@ -130,6 +133,9 @@ export const resolvePiLaunchArgs = (input: {
   }
   if (input.model !== undefined) {
     args.push("--model", input.model);
+  }
+  if (input.thinkingLevel !== undefined && input.thinkingLevel.length > 0) {
+    args.push("--thinking", input.thinkingLevel);
   }
   args.push(...tokenizeCliArgs(input.launchArgs));
   return args;
@@ -577,6 +583,23 @@ function mapPiRequestError(method: string, error: unknown): ProviderAdapterError
 
 const maxStderrLine = (line: string): string =>
   line.length > 2000 ? `${line.slice(0, 2000)}…` : line;
+
+/**
+ * pi prints informational notices to stderr that are not session warnings:
+ * the one-time "creating a new session" notice per thread, and the startup
+ * catalog probe that warns about configured-but-unavailable model patterns
+ * (the active `--model` is unaffected). Surface real failures, not these.
+ */
+const BENIGN_PI_STDERR_PREFIXES = [
+  "Warning: No project session found with id ",
+  "Warning: No models match pattern ",
+] as const;
+
+function isBenignPiStderrLine(line: string): boolean {
+  return BENIGN_PI_STDERR_PREFIXES.some((prefix) => line.startsWith(prefix));
+}
+
+export { isBenignPiStderrLine };
 
 export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
   piSettings: PiSettings,
@@ -1078,6 +1101,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
   const startSession: ProviderAdapterShape<ProviderAdapterError>["startSession"] = (input) =>
     Effect.scoped(
       Effect.gen(function* () {
+        yield* Effect.logInfo("pi adapter startSession enter", {
+          threadId: input.threadId,
+          hasCursor: input.resumeCursor !== undefined,
+          model: input.modelSelection?.model,
+        });
         if (input.provider !== undefined && input.provider !== PROVIDER) {
           return yield* new ProviderAdapterValidationError({
             provider: PROVIDER,
@@ -1106,11 +1134,16 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         const modelSelection =
           input.modelSelection?.instanceId === boundInstanceId ? input.modelSelection : undefined;
         const sessionDir = yield* piSessionDirectory(cwd);
+        yield* Effect.logInfo("pi adapter session dir ready", {
+          threadId: input.threadId,
+          sessionDir,
+        });
         const launchArgs = resolvePiLaunchArgs({
           threadId: input.threadId,
           sessionDir,
           resumeCursor,
           model: modelSelection?.model,
+          thinkingLevel: getModelSelectionStringOptionValue(modelSelection, "thinkingLevel"),
           launchArgs: piSettings.launchArgs,
         });
 
@@ -1134,6 +1167,10 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
               cwd,
               env: sessionEnvironment,
               extendEnv: false,
+              // Commands are written with per-command `Stream.run` into the
+              // stdin sink; the spawner's default `endOnDone: true` would end
+              // stdin after the first write, and pi exits on stdin EOF.
+              stdin: { stream: "pipe", endOnDone: false },
             }),
           )
           .pipe(
@@ -1145,6 +1182,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
               ),
             ),
           );
+        yield* Effect.logInfo("pi adapter spawned", { threadId: input.threadId });
 
         const client = yield* makePiRpcClient({ child }).pipe(
           Effect.provideService(Scope.Scope, sessionScope),
@@ -1274,13 +1312,14 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       ),
       Stream.runForEach((line) =>
         Effect.gen(function* () {
-          if (line.trim().length === 0) {
+          const trimmed = line.trim();
+          if (trimmed.length === 0 || isBenignPiStderrLine(trimmed)) {
             return;
           }
           yield* emit({
             ...(yield* buildEventBase({ threadId: context.threadId })),
             type: "runtime.warning",
-            payload: { message: maxStderrLine(line.trim()) },
+            payload: { message: maxStderrLine(trimmed) },
           }).pipe(Effect.ignore);
         }),
       ),

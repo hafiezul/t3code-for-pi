@@ -67,6 +67,11 @@ export const makePiTextGeneration = Effect.fn("makePiTextGeneration")(function* 
                   cwd,
                   env: { ...environment, ...piApiKeyEnvironment(piSettings) },
                   extendEnv: false,
+                  // Same stdin contract as the session adapter: the RPC client
+                  // writes commands with per-command Stream.run, so stdin must
+                  // survive the first write (default endOnDone: true would EOF
+                  // it and pi exits on stdin EOF).
+                  stdin: { stream: "pipe", endOnDone: false },
                 },
               ),
             )

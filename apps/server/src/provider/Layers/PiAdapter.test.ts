@@ -26,6 +26,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
 import {
+  isBenignPiStderrLine,
   isPiResumeCursor,
   makePiAdapter,
   mapPiEvent,
@@ -49,6 +50,26 @@ const threadId = ThreadId.make("thread-1");
 const turnId = (value: string) => TurnId.make(value);
 
 // ── Pure helpers ────────────────────────────────────────────────────────
+
+describe("isBenignPiStderrLine", () => {
+  it("filters pi's informational stderr notices", () => {
+    expect(
+      isBenignPiStderrLine(
+        "Warning: No project session found with id 'abc'; creating a new session with that id.",
+      ),
+    ).toBe(true);
+    expect(
+      isBenignPiStderrLine('Warning: No models match pattern "openai-codex/gpt-5.6-sol"'),
+    ).toBe(true);
+  });
+
+  it("keeps real pi errors", () => {
+    expect(isBenignPiStderrLine("Error: Failed to connect to provider: connection refused")).toBe(
+      false,
+    );
+    expect(isBenignPiStderrLine("TypeError: Cannot read properties of undefined")).toBe(false);
+  });
+});
 
 describe("resolvePiLaunchArgs", () => {
   const sessionDir = "/tmp/t3/pi/sessions/abc";
@@ -76,6 +97,30 @@ describe("resolvePiLaunchArgs", () => {
       "thread-1",
       "--model",
       "anthropic/claude-sonnet-4-6",
+    ]);
+  });
+
+  it("pins the picked thinking tier when one is selected", () => {
+    expect(
+      resolvePiLaunchArgs({
+        threadId,
+        sessionDir,
+        resumeCursor: undefined,
+        model: "anthropic/claude-sonnet-4-6",
+        thinkingLevel: "low",
+        launchArgs: "",
+      }),
+    ).toEqual([
+      "--mode",
+      "rpc",
+      "--session-dir",
+      sessionDir,
+      "--session-id",
+      "thread-1",
+      "--model",
+      "anthropic/claude-sonnet-4-6",
+      "--thinking",
+      "low",
     ]);
   });
 
@@ -433,14 +478,14 @@ const makeScriptedState = (handler: ScriptedPiState["handler"]): Effect.Effect<S
  */
 const makeScriptedSpawner = (
   state: ScriptedPiState,
-  onSpawn?: (args: ReadonlyArray<string>) => void,
+  onSpawn?: (args: ReadonlyArray<string>, options: ChildProcess.CommandOptions) => void,
 ) =>
   ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
       if (!ChildProcess.isStandardCommand(command)) {
         return yield* Effect.die(new Error("expected a standard pi command"));
       }
-      onSpawn?.(command.args);
+      onSpawn?.(command.args, command.options);
       const exitNever = yield* Deferred.make<ChildProcessSpawner.ExitCode>();
       const stdin = Sink.forEach((chunk: Uint8Array) =>
         Effect.gen(function* () {
@@ -581,7 +626,11 @@ describe("makePiAdapter — scripted RPC process", () => {
         }
       });
       const spawnArgs: Array<ReadonlyArray<string>> = [];
-      const spawner = makeScriptedSpawner(state, (args) => spawnArgs.push(args));
+      const spawnOptions: Array<ChildProcess.CommandOptions> = [];
+      const spawner = makeScriptedSpawner(state, (args, options) => {
+        spawnArgs.push(args);
+        spawnOptions.push(options);
+      });
 
       const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
         Effect.provide(testLayer(spawner)),
@@ -616,6 +665,9 @@ describe("makePiAdapter — scripted RPC process", () => {
         "--model",
         "anthropic/claude-sonnet-4-6",
       ]);
+      // stdin must stay open across per-command writes (endOnDone: true would
+      // EOF it after the first command, and pi exits on stdin EOF).
+      expect(spawnOptions[0]?.stdin).toMatchObject({ endOnDone: false });
       expect(isPiResumeCursor(session.resumeCursor)).toBe(true);
 
       // Queue-mode pins, then the get_state sync.

@@ -68,7 +68,9 @@ The model picker is driven by what pi reports as available. Pi only lists models
 use, so the picker reflects your `~/.pi` credentials, `models.json`, and extensions.
 
 Models appear as `provider/model` slugs (for example `anthropic/claude-sonnet-4-6`). Models that
-support thinking carry a "Thinking" capability label.
+support thinking get a **Thinking** tier selector (Off, Minimal, Low, Medium, High, XHigh, Max);
+the level applies when the session starts, and pi maps it onto what the model actually supports.
+When nothing is picked, pi's own default thinking level applies.
 
 You can also add custom models by typing a slug in the provider's model section in Settings, the
 same way as other providers.
