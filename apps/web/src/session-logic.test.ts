@@ -259,6 +259,7 @@ describe("derivePendingUserInputs", () => {
               },
             ],
             multiSelect: true,
+            answerKind: "options",
           },
         ],
       },
@@ -301,6 +302,117 @@ describe("derivePendingUserInputs", () => {
           requestId: "req-user-input-stale-1",
           detail:
             "Provider adapter request failed (codex) for item/tool/requestUserInput: Unknown pending Codex user input request: req-user-input-stale-1",
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([]);
+  });
+
+  it("keeps text-kind questions with no options", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-text",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-text",
+          questions: [
+            {
+              id: "commit_message",
+              header: "Commit",
+              question: "Write the commit message",
+              options: [],
+              answerKind: "text",
+              placeholder: "e.g. fix(server): ...",
+            },
+          ],
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([
+      {
+        requestId: "req-user-input-text",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        questions: [
+          {
+            id: "commit_message",
+            header: "Commit",
+            question: "Write the commit message",
+            options: [],
+            multiSelect: false,
+            answerKind: "text",
+            placeholder: "e.g. fix(server): ...",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("parses editor-kind questions with their prefill", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-editor",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-editor",
+          questions: [
+            {
+              id: "diff_explanation",
+              header: "Explain",
+              question: "Explain this diff",
+              options: [],
+              answerKind: "editor",
+              initialValue: "This diff ...",
+            },
+          ],
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([
+      {
+        requestId: "req-user-input-editor",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        questions: [
+          {
+            id: "diff_explanation",
+            header: "Explain",
+            question: "Explain this diff",
+            options: [],
+            multiSelect: false,
+            answerKind: "editor",
+            initialValue: "This diff ...",
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("still drops options questions with no options", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-empty-options",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-empty-options",
+          questions: [
+            {
+              id: "broken",
+              header: "Broken",
+              question: "No options?",
+              options: [],
+            },
+          ],
         },
       }),
     ];
@@ -771,6 +883,43 @@ describe("deriveWorkLogEntries", () => {
     const entries = deriveWorkLogEntries(activities);
     expect(entries[0]?.label).toBe("Failed to deploy changes");
     expect(entries[0]?.tone).toBe("error");
+  });
+
+  it("carries extension.notice severity for per-kind chrome", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "notice-info",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "extension.notice",
+        summary: "Checkpoint saved",
+        tone: "info",
+        payload: { message: "Checkpoint saved", noticeType: "info" },
+      }),
+      makeActivity({
+        id: "notice-warning",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "extension.notice",
+        summary: "Model quota low",
+        tone: "info",
+        payload: { message: "Model quota low", noticeType: "warning" },
+      }),
+      makeActivity({
+        id: "notice-error",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "extension.notice",
+        summary: "Extension crashed",
+        tone: "error",
+        payload: { message: "Extension crashed", noticeType: "error" },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries.map((entry) => entry.sourceActivityKind)).toEqual([
+      "extension.notice",
+      "extension.notice",
+      "extension.notice",
+    ]);
+    expect(entries.map((entry) => entry.noticeType)).toEqual([undefined, "warning", "error"]);
   });
 
   it("keeps tool entries from every turn and tags each with its turn id", () => {

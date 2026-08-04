@@ -84,6 +84,8 @@ export interface WorkLogEntry {
   toolLifecycleStatus?: WorkLogToolLifecycleStatus;
   /** Originating orchestration activity kind (e.g. `user-input.requested`) for row chrome. */
   sourceActivityKind?: OrchestrationThreadActivity["kind"];
+  /** Severity of an `extension.notice` row (from the activity payload), for per-kind chrome. */
+  noticeType?: "info" | "warning" | "error";
 }
 
 interface DerivedWorkLogEntry extends WorkLogEntry {
@@ -433,6 +435,10 @@ function parseUserInputQuestions(
       ) {
         return null;
       }
+      const answerKind =
+        question.answerKind === "text" || question.answerKind === "editor"
+          ? question.answerKind
+          : "options";
       const options = question.options
         .map<UserInputQuestion["options"][number] | null>((option) => {
           if (!option || typeof option !== "object") return null;
@@ -449,7 +455,8 @@ function parseUserInputQuestions(
           };
         })
         .filter((option): option is UserInputQuestion["options"][number] => option !== null);
-      if (options.length === 0) {
+      // Text kinds carry no options; only options questions require a non-empty list.
+      if (answerKind === "options" && options.length === 0) {
         return null;
       }
       return {
@@ -458,7 +465,14 @@ function parseUserInputQuestions(
         question: question.question,
         options,
         multiSelect: question.multiSelect === true,
-      };
+        answerKind,
+        ...(typeof question.placeholder === "string" && question.placeholder.length > 0
+          ? { placeholder: question.placeholder }
+          : {}),
+        ...(typeof question.initialValue === "string" && question.initialValue.length > 0
+          ? { initialValue: question.initialValue }
+          : {}),
+      } satisfies UserInputQuestion;
     })
     .filter((question): question is UserInputQuestion => question !== null);
   return parsed.length > 0 ? parsed : null;
@@ -723,6 +737,12 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
           : activity.tone,
     activityKind: activity.kind,
   };
+  if (
+    activity.kind === "extension.notice" &&
+    (payload?.noticeType === "warning" || payload?.noticeType === "error")
+  ) {
+    entry.noticeType = payload.noticeType;
+  }
   const itemType = extractWorkLogItemType(payload);
   const requestKind = extractWorkLogRequestKind(payload);
   if (detail) {

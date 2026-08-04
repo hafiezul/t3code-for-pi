@@ -14,6 +14,8 @@ interface PendingUserInputPanelProps {
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
+  /** Draft-only write for text-kind questions (the panel's own input field). */
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
   onAdvance: () => void;
 }
 
@@ -23,6 +25,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
   onAdvance,
 }: PendingUserInputPanelProps) {
   if (pendingUserInputs.length === 0) return null;
@@ -37,6 +40,7 @@ export const ComposerPendingUserInputPanel = memo(function ComposerPendingUserIn
       answers={answers}
       questionIndex={questionIndex}
       onToggleOption={onToggleOption}
+      onChangeCustomAnswer={onChangeCustomAnswer}
       onAdvance={onAdvance}
     />
   );
@@ -48,6 +52,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers,
   questionIndex,
   onToggleOption,
+  onChangeCustomAnswer,
   onAdvance,
 }: {
   prompt: PendingUserInput;
@@ -55,6 +60,7 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
   answers: Record<string, PendingUserInputDraftAnswer>;
   questionIndex: number;
   onToggleOption: (questionId: string, optionLabel: string) => void;
+  onChangeCustomAnswer: (questionId: string, value: string) => void;
   onAdvance: () => void;
 }) {
   const progress = derivePendingUserInputProgress(prompt.questions, answers, questionIndex);
@@ -146,11 +152,44 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
     return () => document.removeEventListener("keydown", handler);
   }, [activeQuestion, isResponding]);
 
+  // Seed the editor draft with the prefill so the question starts answered
+  // (accepting it as-is sends it; clearing the field makes it unanswered).
+  const seededEditorQuestionIdsRef = useRef<Set<string>>(new Set());
+  const editorInitialValue =
+    activeQuestion?.answerKind === "editor" ? (activeQuestion.initialValue ?? "") : null;
+  useEffect(() => {
+    if (editorInitialValue === null || editorInitialValue.length === 0 || !activeQuestion) {
+      return;
+    }
+    if (seededEditorQuestionIdsRef.current.has(activeQuestion.id)) {
+      return;
+    }
+    if (answers[activeQuestion.id]?.customAnswer !== undefined) {
+      return;
+    }
+    seededEditorQuestionIdsRef.current.add(activeQuestion.id);
+    onChangeCustomAnswer(activeQuestion.id, editorInitialValue);
+  }, [activeQuestion, answers, editorInitialValue, onChangeCustomAnswer]);
+
+  const handleTextKeyDown = useEffectEvent((event: React.KeyboardEvent) => {
+    if (!activeQuestion) return;
+    const advance =
+      activeQuestion.answerKind === "text"
+        ? event.key === "Enter" && !event.shiftKey
+        : event.key === "Enter" && (event.metaKey || event.ctrlKey);
+    if (!advance) return;
+    if (!progress.canAdvance || isResponding) return;
+    event.preventDefault();
+    onAdvance();
+  });
+
   if (!activeQuestion) {
     return null;
   }
 
-  const customAnswerActive = progress.customAnswer.trim().length > 0;
+  const isTextKind = activeQuestion.answerKind === "text" || activeQuestion.answerKind === "editor";
+  const customAnswerActive = !isTextKind && progress.customAnswer.trim().length > 0;
+  const draftAnswer = answers[activeQuestion.id]?.customAnswer ?? "";
 
   return (
     <div className="px-4 py-3 sm:px-5">
@@ -168,60 +207,86 @@ const ComposerPendingUserInputCard = memo(function ComposerPendingUserInputCard(
       {activeQuestion.multiSelect ? (
         <p className="mt-1 text-xs text-muted-foreground/65">Select one or more options.</p>
       ) : null}
-      <div className="mt-3 space-y-1.5">
-        {activeQuestion.options.map((option, index) => {
-          const isOptimisticallySelected =
-            optimisticSingleSelect?.questionId === activeQuestion.id &&
-            optimisticSingleSelect.optionLabel === option.label;
-          const isSelected =
-            isOptimisticallySelected ||
-            (!customAnswerActive && progress.selectedOptionLabels.includes(option.label));
-          const shortcutKey = index < 9 ? index + 1 : null;
-          const className = cn(
-            "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-all duration-150 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25",
-            isSelected
-              ? "border-primary/30 bg-primary/8 text-foreground"
-              : "border-transparent bg-muted/22 text-foreground/85 hover:border-border/45 hover:bg-muted/34",
-            isResponding && "opacity-50 cursor-not-allowed",
-            !isResponding && "cursor-pointer",
-          );
-          const content = (
-            <>
-              <div className="min-w-0 flex-1 flex flex-col gap-0.5">
-                <span className="text-sm font-medium">{option.label}</span>
-                {option.description && option.description !== option.label ? (
-                  <span className="text-xs text-muted-foreground">{option.description}</span>
-                ) : null}
-              </div>
-              {isSelected ? (
-                <CheckIcon className="size-3.5 shrink-0 text-primary" />
-              ) : shortcutKey !== null ? (
-                <kbd
-                  className={cn(
-                    "flex size-5 shrink-0 items-center justify-center rounded border border-border/50 text-[11px] font-medium tabular-nums transition-colors duration-150",
-                    "bg-background/35 text-muted-foreground/70 group-hover:border-border/70 group-hover:text-muted-foreground",
-                  )}
-                >
-                  {shortcutKey}
-                </kbd>
-              ) : null}
-            </>
-          );
-          return (
-            <button
-              key={`${activeQuestion.id}:${option.label}`}
-              type="button"
+      {isTextKind ? (
+        <div className="mt-3">
+          {activeQuestion.answerKind === "editor" ? (
+            <textarea
+              value={draftAnswer}
+              onChange={(event) => onChangeCustomAnswer(activeQuestion.id, event.target.value)}
+              onKeyDown={handleTextKeyDown}
               disabled={isResponding}
-              onClick={() => {
-                handleOptionSelection(activeQuestion.id, option.label);
-              }}
-              className={className}
-            >
-              {content}
-            </button>
-          );
-        })}
-      </div>
+              placeholder={activeQuestion.placeholder}
+              rows={5}
+              className="w-full resize-y rounded-lg border border-border/70 bg-muted/22 px-3 py-2 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25 disabled:opacity-50"
+            />
+          ) : (
+            <input
+              type="text"
+              value={draftAnswer}
+              onChange={(event) => onChangeCustomAnswer(activeQuestion.id, event.target.value)}
+              onKeyDown={handleTextKeyDown}
+              disabled={isResponding}
+              placeholder={activeQuestion.placeholder ?? "Type your answer…"}
+              className="h-9 w-full rounded-lg border border-border/70 bg-muted/22 px-3 text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground/50 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25 disabled:opacity-50"
+            />
+          )}
+        </div>
+      ) : (
+        <div className="mt-3 space-y-1.5">
+          {activeQuestion.options.map((option, index) => {
+            const isOptimisticallySelected =
+              optimisticSingleSelect?.questionId === activeQuestion.id &&
+              optimisticSingleSelect.optionLabel === option.label;
+            const isSelected =
+              isOptimisticallySelected ||
+              (!customAnswerActive && progress.selectedOptionLabels.includes(option.label));
+            const shortcutKey = index < 9 ? index + 1 : null;
+            const className = cn(
+              "group flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-all duration-150 focus-visible:border-primary/40 focus-visible:ring-1 focus-visible:ring-primary/25",
+              isSelected
+                ? "border-primary/30 bg-primary/8 text-foreground"
+                : "border-transparent bg-muted/22 text-foreground/85 hover:border-border/45 hover:bg-muted/34",
+              isResponding && "opacity-50 cursor-not-allowed",
+              !isResponding && "cursor-pointer",
+            );
+            const content = (
+              <>
+                <div className="min-w-0 flex-1 flex flex-col gap-0.5">
+                  <span className="text-sm font-medium">{option.label}</span>
+                  {option.description && option.description !== option.label ? (
+                    <span className="text-xs text-muted-foreground">{option.description}</span>
+                  ) : null}
+                </div>
+                {isSelected ? (
+                  <CheckIcon className="size-3.5 shrink-0 text-primary" />
+                ) : shortcutKey !== null ? (
+                  <kbd
+                    className={cn(
+                      "flex size-5 shrink-0 items-center justify-center rounded border border-border/50 text-[11px] font-medium tabular-nums transition-colors duration-150",
+                      "bg-background/35 text-muted-foreground/70 group-hover:border-border/70 group-hover:text-muted-foreground",
+                    )}
+                  >
+                    {shortcutKey}
+                  </kbd>
+                ) : null}
+              </>
+            );
+            return (
+              <button
+                key={`${activeQuestion.id}:${option.label}`}
+                type="button"
+                disabled={isResponding}
+                onClick={() => {
+                  handleOptionSelection(activeQuestion.id, option.label);
+                }}
+                className={className}
+              >
+                {content}
+              </button>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 });

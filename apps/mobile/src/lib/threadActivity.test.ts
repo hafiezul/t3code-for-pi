@@ -13,7 +13,9 @@ import {
 
 import {
   buildThreadFeed,
+  derivePendingUserInputs,
   deriveThreadFeedPresentation,
+  sortThreadActivities,
   type ThreadFeedActivity,
   type ThreadFeedEntry,
 } from "./threadActivity";
@@ -531,5 +533,161 @@ describe("buildThreadFeed", () => {
       type: "work-toggle",
       expanded: true,
     });
+  });
+});
+
+describe("derivePendingUserInputs", () => {
+  it("keeps text-kind questions with no options", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-text"),
+      projectId: ProjectId.make("project-1"),
+      title: "Text input",
+      activities: [
+        makeActivity({
+          id: EventId.make("user-input-text"),
+          kind: "user-input.requested",
+          summary: "User input requested",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          payload: {
+            requestId: "req-user-input-text",
+            questions: [
+              {
+                id: "commit_message",
+                header: "Commit",
+                question: "Write the commit message",
+                options: [],
+                answerKind: "text",
+                placeholder: "e.g. fix(server): ...",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    const pending = derivePendingUserInputs(sortThreadActivities(thread.activities));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.questions[0]).toMatchObject({
+      id: "commit_message",
+      answerKind: "text",
+      placeholder: "e.g. fix(server): ...",
+    });
+  });
+
+  it("parses editor-kind questions with their prefill", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-editor"),
+      projectId: ProjectId.make("project-1"),
+      title: "Editor input",
+      activities: [
+        makeActivity({
+          id: EventId.make("user-input-editor"),
+          kind: "user-input.requested",
+          summary: "User input requested",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          payload: {
+            requestId: "req-user-input-editor",
+            questions: [
+              {
+                id: "diff_explanation",
+                header: "Explain",
+                question: "Explain this diff",
+                options: [],
+                answerKind: "editor",
+                initialValue: "This diff ...",
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    const pending = derivePendingUserInputs(sortThreadActivities(thread.activities));
+    expect(pending).toHaveLength(1);
+    expect(pending[0]?.questions[0]).toMatchObject({
+      id: "diff_explanation",
+      answerKind: "editor",
+      initialValue: "This diff ...",
+    });
+  });
+
+  it("still drops options questions with no options", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-broken"),
+      projectId: ProjectId.make("project-1"),
+      title: "Broken input",
+      activities: [
+        makeActivity({
+          id: EventId.make("user-input-broken"),
+          kind: "user-input.requested",
+          summary: "User input requested",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          payload: {
+            requestId: "req-user-input-broken",
+            questions: [
+              {
+                id: "broken",
+                header: "Broken",
+                question: "No options?",
+                options: [],
+              },
+            ],
+          },
+        }),
+      ],
+    });
+
+    const pending = derivePendingUserInputs(sortThreadActivities(thread.activities));
+    expect(pending).toEqual([]);
+  });
+});
+
+describe("buildThreadFeed extension.notice chrome", () => {
+  it("maps notice severity onto icons like runtime.warning", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-notices"),
+      projectId: ProjectId.make("project-1"),
+      title: "Notices",
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("notice-info"),
+          kind: "extension.notice",
+          summary: "Checkpoint saved",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          payload: { message: "Checkpoint saved", noticeType: "info" },
+        }),
+        makeActivity({
+          id: EventId.make("notice-warning"),
+          kind: "extension.notice",
+          summary: "Model quota low",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          payload: { message: "Model quota low", noticeType: "warning" },
+        }),
+        makeActivity({
+          id: EventId.make("notice-error"),
+          kind: "extension.notice",
+          summary: "Extension crashed",
+          tone: "error",
+          createdAt: "2026-04-01T00:00:04.000Z",
+          payload: { message: "Extension crashed", noticeType: "error" },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const group = feed.find((entry) => entry.type === "activity-group");
+    expect(group?.type === "activity-group" ? group.activities.map((a) => a.icon) : []).toEqual([
+      "check",
+      "warning",
+      "alert",
+    ]);
   });
 });

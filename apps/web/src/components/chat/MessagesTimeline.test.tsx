@@ -655,4 +655,55 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("lucide-x");
     expect(markup).toContain('aria-label="Tool call failed"');
   });
+
+  it("renders extension.notice warning rows with the runtime.warning style", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Model quota low",
+              tone: "info",
+              sourceActivityKind: "extension.notice",
+              noticeType: "warning",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Model quota low");
+    expect(markup).toContain("text-warning");
+  });
+
+  it("renders info extension.notice rows without warning styling", () => {
+    const markup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-1",
+            kind: "work",
+            createdAt: "2026-03-17T19:12:28.000Z",
+            entry: {
+              id: "work-1",
+              createdAt: "2026-03-17T19:12:28.000Z",
+              label: "Checkpoint saved",
+              tone: "info",
+              sourceActivityKind: "extension.notice",
+            },
+          },
+        ]}
+      />,
+    );
+
+    expect(markup).toContain("Checkpoint saved");
+    expect(markup).not.toContain("text-warning");
+  });
 });

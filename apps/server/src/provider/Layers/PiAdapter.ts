@@ -3,6 +3,10 @@
  *
  * Protocol/design contract (wayfinder #44/#45/#47/#51/#52):
  *
+ * @effect-diagnostics globalTimers:off -- the command-turn completion grace
+ * window uses a wall-clock timer: Effect.sleep parks forever under the
+ * adapter tests' TestClock, and production time is real wall-clock anyway.
+ *
  *   - One long-lived `pi --mode rpc` subprocess per thread, spawned lazily
  *     in the project cwd, kept alive across turns, torn down by
  *     `stopSession` / the idle reaper / adapter shutdown. Server restart
@@ -197,6 +201,9 @@ interface PiAdapterSessionContext {
   /** One-shot: the next `agent_settled` follows an `abort` and must not
    *  close the turn or record a boundary. */
   readonly suppressNextSettled: Ref.Ref<boolean>;
+  /** Set when the agent loop shows activity after a command prompt's
+   *  response — blocks the synthetic command-turn completion. */
+  readonly agentActivitySincePromptRef: Ref.Ref<boolean>;
   /** One-shot guard flipped by stop / unexpected exit. */
   readonly stopped: Ref.Ref<boolean>;
   /** Boundary-recording jobs, serialized by a single worker fiber. */
@@ -304,8 +311,46 @@ export function mapPiEvent(
       ];
     }
 
+    case "custom_message": {
+      // Extension output — `display: true` entries show in pi's TUI, hidden
+      // ones are LLM-context-only. Surface visible output as an info notice
+      // row so command results land in the work log (e.g. `/quota`).
+      const display = (event as Record<string, unknown>).display;
+      if (display !== true) {
+        return [];
+      }
+      const message = piTextContent(event as Record<string, unknown>);
+      if (!message || message.length === 0) {
+        return [];
+      }
+      return [
+        {
+          ...base,
+          type: "extension.notice",
+          payload: { message, noticeType: "info" },
+        },
+      ];
+    }
+
     case "message_start": {
       const message = (event.message ?? {}) as Record<string, unknown>;
+      // pi 0.83.0 streams extension `sendMessage({display: true})` output as
+      // a `message_start` with role "custom" (the `custom_message` form only
+      // appears in the persisted session log) — surface it as an info
+      // notice row so command output lands in the work log.
+      if (message.role === "custom") {
+        const customText = piTextContent(message);
+        if (!customText || customText.length === 0) {
+          return [];
+        }
+        return [
+          {
+            ...base,
+            type: "extension.notice",
+            payload: { message: customText, noticeType: "info" },
+          },
+        ];
+      }
       // Only assistant-role messages become timeline items (user echoes and
       // toolResult messages are owned by their tool items).
       if (message.role !== "assistant") {
@@ -985,6 +1030,19 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       event,
     });
 
+    // Agent-loop activity after a command prompt's response means the turn
+    // is doing real model work — the synthetic command-turn completion in
+    // `sendTurn` must not fire (pi settles normally in that case).
+    if (
+      event.type === "agent_settled" ||
+      (event.type === "message_start" &&
+        typeof event.message === "object" &&
+        event.message !== null &&
+        (event.message as Record<string, unknown>).role === "assistant")
+    ) {
+      yield* Ref.set(context.agentActivitySincePromptRef, true);
+    }
+
     if (event.type === "extension_ui_request") {
       yield* handleUiRequest(context, event);
       return;
@@ -1349,6 +1407,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
           ),
           pendingUiRequests: new Map(),
           suppressNextSettled: yield* Ref.make(false),
+          agentActivitySincePromptRef: yield* Ref.make(false),
           stopped: yield* Ref.make(false),
           boundaryJobs,
         };
@@ -1551,6 +1610,40 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
               }),
         ),
       );
+
+      // pi emits no `agent_settled` for extension-command turns: `prompt()`
+      // runs the command handler and returns before the agent loop (pi
+      // upstream), so the turn would hang forever. pi sends the prompt
+      // response only after `prompt()` resolves, and for agent turns the
+      // settle is emitted before that response — so a fresh turn still
+      // active here is a command turn. Wait a short grace window for
+      // fire-and-forget agent work (assistant messages) to start, then
+      // synthesize completion.
+      if (steeringTurnId === undefined && context.activeTurnId === turnId) {
+        yield* Ref.set(context.agentActivitySincePromptRef, false);
+        // Node timer, not `Effect.sleep`: the adapter's tests run under a
+        // TestClock where Effect.sleep never resumes, and production time is
+        // real wall-clock anyway.
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              // @effect-diagnostics-next-line globalTimers:off -- real wall-clock
+              // grace window; Effect.sleep parks forever under the tests' TestClock.
+              setTimeout(resolve, 2000);
+            }),
+        );
+        const sawAgentActivity = yield* Ref.get(context.agentActivitySincePromptRef);
+        const stopped = yield* Ref.get(context.stopped);
+        if (!sawAgentActivity && !stopped && context.activeTurnId === turnId) {
+          context.activeTurnId = undefined;
+          yield* emit({
+            ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+            type: "turn.completed",
+            payload: { state: "completed" },
+          });
+          yield* Queue.offer(context.boundaryJobs, void 0);
+        }
+      }
 
       const cursor = yield* buildResumeCursor(context);
       return {

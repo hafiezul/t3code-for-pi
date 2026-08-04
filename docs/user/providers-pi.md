@@ -59,8 +59,42 @@ somewhere unusual, set the full path instead.
   use the provider instance's Environment variables section. Sensitive values are stored as server
   secrets.
 
-Pi's own configuration stays in `~/.pi` (config, `auth.json`, `models.json`). There is no pi
-configuration UI inside T3 Code; edit `~/.pi` with the pi TUI or directly.
+Pi's own configuration stays in `~/.pi` (config, `auth.json`, `models.json`), and T3 Code adds a
+Pi environment config editor for the main settings file — see [Pi Environment Config](#pi-environment-config)
+below. For anything else, edit `~/.pi` with the pi TUI or directly.
+
+## Extension UI
+
+Pi extensions can ask the running session for attention, and T3 Code renders that on the thread:
+
+- **Notices** — when an extension calls `notify`, T3 Code shows a timeline row with the message.
+  Info notices render as a regular row; warning and error notices get the same warning/destructive
+  styling as T3 Code's own runtime warnings and errors.
+- **Status chips** — when an extension calls `setStatus`, a small read-only pill appears in the
+  composer control row (up to three, then a `+N more` pill). Chips disappear when the session ends
+  or the extension clears the status.
+- **Dialogs** — extension `select` and `confirm` prompts render as option buttons. `input` and
+  `editor` prompts render as a text field or a multiline editor inside the same panel — the editor
+  comes prefilled with the extension's starting text. Type your answer and press Enter (Cmd/Ctrl+Enter
+  in the multiline editor) to submit; a submitted answer can't be cancelled, so interrupt the turn
+  instead if you want out.
+
+Widgets (`setWidget`), titles (`setTitle`), and TUI-style editor requests (`set_editor_text`) are
+not rendered; those stay in the pi TUI.
+
+## Pi Environment Config
+
+In Settings → Pi → expand the instance, the **Pi environment config** section at the bottom edits
+pi's global `settings.json` (e.g. `~/.pi/agent/settings.json`). The file is shared by all pi
+instances on this machine, and changes apply to **new** pi sessions — running sessions keep their
+current settings.
+
+- **Curated fields** — default thinking level (Off through Max, or unset), default provider, and
+  default model. Empty fields are left out of the file, so pi's own defaults apply.
+- **Raw JSON** — a whole-file editor for anything else. It must stay strict JSON; the save button
+  stays disabled while the file wouldn't parse. If pi currently can't read the file (it was edited
+  by hand and broke), T3 Code shows a warning and lets you fix it right there. Saving never
+  overwrites pi-managed keys like `lastChangelogVersion`.
 
 ## Picking Models
 
@@ -82,6 +116,15 @@ You can change the picked model while a thread is running. The change applies on
 loss. If pi rejects the new model, T3 Code shows a notice and the session continues on the previous
 model.
 
+## Commands in the Composer
+
+Type `/` in the prompt to open the command menu. Pi's commands are listed there, grouped the way
+pi organizes them — **Extension**, **Skill**, and **Prompt** — alongside T3 Code's built-in
+commands (`/model`, `/plan`, `/default`). Pick one to insert it, or type `/name` and the rest of
+your prompt as usual; pi expands the command when the turn runs. Skills insert as a chip in the
+composer (icon + name, description on hover) and send as the `/skill:name` invocation pi
+understands. Skills also stay available through their own search (type `/` and filter).
+
 ## Permissions
 
 Pi has no per-tool permission prompts: when it wants to run a command or edit a file, it does so.
@@ -100,10 +143,11 @@ also update manually:
 npm install -g @earendil-works/pi-coding-agent@latest
 ```
 
-## What Is Not In T3 Code (v1)
+## What Is Not In T3 Code
 
-- **Slash-command picker** — pi slash commands are typed as text (e.g. `/compact`) in the prompt;
-  pi expands them. T3 Code's own `/` menu is untouched.
-- **Extension command palette** — pi extensions' commands and tools surface through prompts and pi's
-  own dialogs, not a T3 Code palette.
-- **Pi configuration UI** — pi config stays in `~/.pi`; use the pi TUI or edit the files directly.
+- **Per-project pi commands** — the `/` menu lists pi's commands from the user-level install. A
+  project's own `.pi` resources only show up when that project is the server's working directory.
+- **Project-level settings editing** — per-repo `.pi/settings.json` stays a CLI/file concern.
+- **Package management UI** — `pi install` / `pi remove` / `pi config` stay in the pi TUI.
+- **Pi TUI embedding** — the interactive TUI stays a terminal app.
+- **Authoring commands and skills from T3** — write those in the pi TUI or by hand.

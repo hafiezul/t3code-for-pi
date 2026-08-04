@@ -49,6 +49,11 @@ export function resolvePendingUserInputAnswer(
   question: UserInputQuestion,
   draft: PendingUserInputDraftAnswer | undefined,
 ): string | string[] | null {
+  // Text kinds answer from the draft's text only — no options, no multiSelect.
+  if (question.answerKind === "text" || question.answerKind === "editor") {
+    return normalizeDraftAnswer(draft?.customAnswer);
+  }
+
   const customAnswer = normalizeDraftAnswer(draft?.customAnswer);
   if (customAnswer) {
     return customAnswer;

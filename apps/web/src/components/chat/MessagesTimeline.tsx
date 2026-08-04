@@ -1929,7 +1929,9 @@ const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: {
   const activity = use(TimelineRowActivityCtx);
   const [expanded, setExpanded] = useState(false);
   const iconConfig = workToneIcon(workEntry.tone);
-  const showWarningIndicator = workEntry.sourceActivityKind === "runtime.warning";
+  const showWarningIndicator =
+    workEntry.sourceActivityKind === "runtime.warning" ||
+    (workEntry.sourceActivityKind === "extension.notice" && workEntry.noticeType === "warning");
   const entryIconName = showWarningIndicator ? "x" : workEntryIconName(workEntry);
   const heading = toolWorkEntryHeading(workEntry);
   const rawPreview = workEntryPreview(workEntry, workspaceRoot);

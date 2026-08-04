@@ -341,6 +341,12 @@ interface ProviderInstanceCardProps {
    * omit it.
    */
   readonly headerAction?: ReactNode | undefined;
+  /**
+   * Optional content rendered at the bottom of the expanded card, after the
+   * models section. Used by driver-specific extras (e.g. the pi environment
+   * config editor) that need RPC access from the settings panel.
+   */
+  readonly footerContent?: ReactNode | undefined;
   readonly hiddenModels: ReadonlyArray<string>;
   readonly favoriteModels: ReadonlyArray<string>;
   readonly modelOrder: ReadonlyArray<string>;
@@ -385,6 +391,7 @@ export function ProviderInstanceCard({
   onUpdate,
   onDelete,
   headerAction,
+  footerContent,
   hiddenModels,
   favoriteModels,
   modelOrder,
@@ -798,6 +805,7 @@ export function ProviderInstanceCard({
                 </p>
               </div>
             )}
+            {footerContent}
           </div>
         </CollapsibleContent>
       </Collapsible>

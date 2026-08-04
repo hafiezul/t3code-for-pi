@@ -125,15 +125,26 @@ describe("parsePiCommands", () => {
     id: "c1",
     command: "get_commands",
     success: true,
-    data: [
-      { name: "/fix", description: "Fix lint errors", source: "extension" },
-      { name: "summarize", description: "Summarize the branch", source: "prompt" },
-      { name: "skill:plan", description: "Run the plan skill", source: "skill" },
-      { name: "legacy", description: "Old template", source: "template" },
-      { name: "nodesc", source: "extension" },
-      { name: "bogus", source: "unknown-source" },
-      "not-an-object",
-    ],
+    // pi 0.83.0 nests the rows under `data.commands` — the real shape.
+    data: {
+      commands: [
+        { name: "/fix", description: "Fix lint errors", source: "extension" },
+        { name: "summarize", description: "Summarize the branch", source: "prompt" },
+        { name: "skill:plan", description: "Run the plan skill", source: "skill" },
+        { name: "legacy", description: "Old template", source: "template" },
+        { name: "nodesc", source: "extension" },
+        { name: "bogus", source: "unknown-source" },
+        "not-an-object",
+      ],
+    },
+  });
+
+  // Older builds/docs put the rows array directly on `data`.
+  const legacyCommandLine = JSON.stringify({
+    type: "response",
+    command: "get_commands",
+    success: true,
+    data: [{ name: "legacy-array", description: "Old shape", source: "extension" }],
   });
 
   it("selects the get_commands response among boot noise and maps sources", () => {
@@ -145,6 +156,12 @@ describe("parsePiCommands", () => {
       // "template" is pi's pre-rename source value for prompt templates.
       { name: "legacy", description: "Old template", source: "prompt" },
       { name: "nodesc", description: undefined, source: "extension" },
+    ]);
+  });
+
+  it("also parses the legacy array-on-data response shape", () => {
+    expect(parsePiCommands(legacyCommandLine)).toEqual([
+      { name: "legacy-array", description: "Old shape", source: "extension" },
     ]);
   });
 
@@ -289,11 +306,14 @@ describe("checkPiProviderStatus", () => {
                 id: "c1",
                 command: "get_commands",
                 success: true,
-                data: [
-                  { name: "/fix", description: "Fix lint errors", source: "extension" },
-                  { name: "skill:plan", description: "Plan skill", source: "skill" },
-                  { name: "summarize", description: "Branch summary", source: "prompt" },
-                ],
+                // Real pi 0.83.0 shape: rows nested under `data.commands`.
+                data: {
+                  commands: [
+                    { name: "/fix", description: "Fix lint errors", source: "extension" },
+                    { name: "skill:plan", description: "Plan skill", source: "skill" },
+                    { name: "summarize", description: "Branch summary", source: "prompt" },
+                  ],
+                },
               }),
             ].join("\n") + "\n",
           );

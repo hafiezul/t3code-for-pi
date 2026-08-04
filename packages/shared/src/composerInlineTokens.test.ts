@@ -36,6 +36,31 @@ describe("collectComposerInlineTokens", () => {
     expect(collectComposerInlineTokens("Inspect @AGENTS.md")).toEqual([]);
   });
 
+  it("tokenizes pi's /skill:name invocation form with the slash source", () => {
+    expect(collectComposerInlineTokens("run /skill:tdd now")).toEqual([
+      {
+        type: "skill",
+        value: "tdd",
+        source: "/skill:tdd",
+        start: 4,
+        end: 14,
+      },
+    ]);
+    expect(collectComposerInlineTokens("/skill:ask-matt ")).toEqual([
+      {
+        type: "skill",
+        value: "ask-matt",
+        source: "/skill:ask-matt",
+        start: 0,
+        end: 15,
+      },
+    ]);
+  });
+
+  it("does not tokenize incomplete /skill: tokens", () => {
+    expect(collectComposerInlineTokens("run /skill:tdd")).toEqual([]);
+  });
+
   it("keeps the delimiter after a token outside its source range", () => {
     const text = "Inspect [package.json](package.json) next";
 

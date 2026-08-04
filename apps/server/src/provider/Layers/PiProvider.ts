@@ -269,11 +269,20 @@ export function parsePiCommands(stdout: string): ReadonlyArray<PiCommandRow> {
     if (parsed.type !== "response" || parsed.command !== "get_commands") {
       continue;
     }
+    // pi 0.83.0 nests the rows under `data.commands`; older builds/docs
+    // put the array directly on `data` — tolerate both.
     const data = parsed.data;
-    if (!Array.isArray(data)) {
+    const entries = Array.isArray(data)
+      ? data
+      : typeof data === "object" &&
+          data !== null &&
+          Array.isArray((data as Record<string, unknown>).commands)
+        ? ((data as Record<string, unknown>).commands as Array<unknown>)
+        : null;
+    if (entries === null) {
       continue;
     }
-    for (const entry of data) {
+    for (const entry of entries) {
       if (typeof entry !== "object" || entry === null) {
         continue;
       }

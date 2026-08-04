@@ -53,7 +53,7 @@ export type ComposerCommandItem =
       description: string;
     };
 
-type ComposerCommandGroup = {
+export type ComposerCommandGroup = {
   id: string;
   label: string | null;
   items: ComposerCommandItem[];
@@ -78,7 +78,7 @@ function SkillGlyph(props: { className?: string }) {
   );
 }
 
-function groupCommandItems(
+export function groupCommandItems(
   items: ComposerCommandItem[],
   triggerKind: ComposerTriggerKind | null,
   groupSlashCommandSections: boolean,
@@ -98,7 +98,30 @@ function groupCommandItems(
     groups.push({ id: "built-in", label: "Built-in", items: builtInItems });
   }
   if (providerItems.length > 0) {
-    groups.push({ id: "provider", label: "Provider", items: providerItems });
+    // Providers that tag their commands with a group (pi: Extension / Skill /
+    // Prompt) get one section per group, in first-appearance order (the
+    // server already orders by pi's execution precedence). Commands without
+    // a group stay in the flat "Provider" section, so Claude and Codex are
+    // pixel-identical to today.
+    const providerItemsByGroup = new Map<string, ComposerCommandItem[]>();
+    const ungroupedProviderItems: ComposerCommandItem[] = [];
+    for (const item of providerItems) {
+      if (item.type !== "provider-slash-command") continue;
+      const group = item.command.group;
+      if (group) {
+        const groupItems = providerItemsByGroup.get(group) ?? [];
+        groupItems.push(item);
+        providerItemsByGroup.set(group, groupItems);
+      } else {
+        ungroupedProviderItems.push(item);
+      }
+    }
+    for (const [group, groupItems] of providerItemsByGroup) {
+      groups.push({ id: `provider-group:${group}`, label: group, items: groupItems });
+    }
+    if (ungroupedProviderItems.length > 0) {
+      groups.push({ id: "provider", label: "Provider", items: ungroupedProviderItems });
+    }
   }
   return groups;
 }

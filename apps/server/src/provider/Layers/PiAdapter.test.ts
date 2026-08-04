@@ -456,6 +456,53 @@ describe("mapPiEvent", () => {
     );
   });
 
+  it("surfaces visible custom messages as info notice rows and drops hidden ones", () => {
+    expect(
+      mapPiEvent(
+        {
+          type: "custom_message",
+          customType: "pi-quota-status",
+          content: "No tracked quota data yet.",
+          display: true,
+        },
+        baseInput,
+      ),
+    ).toEqual([
+      {
+        turnId: "pi-turn-1",
+        type: "extension.notice",
+        payload: { message: "No tracked quota data yet.", noticeType: "info" },
+      },
+    ]);
+    expect(
+      mapPiEvent(
+        { type: "custom_message", customType: "quota", content: "hidden", display: false },
+        baseInput,
+      ),
+    ).toEqual([]);
+  });
+
+  it("surfaces custom-role message_start rows (pi's live form of sendMessage output)", () => {
+    expect(
+      mapPiEvent(
+        {
+          type: "message_start",
+          message: { role: "custom", content: "No tracked quota data yet." },
+        },
+        baseInput,
+      ),
+    ).toEqual([
+      {
+        turnId: "pi-turn-1",
+        type: "extension.notice",
+        payload: { message: "No tracked quota data yet.", noticeType: "info" },
+      },
+    ]);
+    expect(
+      mapPiEvent({ type: "message_start", message: { role: "custom", content: "" } }, baseInput),
+    ).toEqual([]);
+  });
+
   it("ignores unknown and bookkeeping events by default", () => {
     for (const type of [
       "queue_update",
@@ -773,6 +820,100 @@ describe("makePiAdapter — scripted RPC process", () => {
   );
 
   it.effect(
+    "completes extension-command turns that pi never settles, surfacing command output",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_steering_mode":
+            case "set_follow_up_mode":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // Command-only turn: pi runs the extension handler and returns
+              // without agent events or agent_settled (upstream behavior).
+              // `sendMessage({display:true})` streams live as a custom-role
+              // message_start (the `custom_message` form is session-log only).
+              return [
+                reply(command),
+                {
+                  type: "message_start",
+                  message: { role: "custom", content: "No tracked quota data yet." },
+                },
+                { type: "message_end", message: { role: "custom" } },
+              ];
+            case "get_entries":
+              return [reply(command, { data: { entries: [], leafId: "leaf-1" } })];
+            case "abort":
+              return [{ type: "agent_settled" }, reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled },
+          matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/pi-project",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        yield* adapter.sendTurn({
+          threadId,
+          input: "/quota",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        // The turn completes without any agent_settled: the adapter
+        // synthesizes it after the command response's grace window.
+        yield* Deferred.await(settled);
+        const events = yield* Ref.get(collector.events);
+        const types = events.map((event) => event.type);
+        expect(types).toContain("turn.started");
+        expect(types).toContain("extension.notice");
+        expect(types.filter((type) => type === "turn.completed")).toHaveLength(1);
+        const notice = events.find((event) => event.type === "extension.notice");
+        expect(notice?.payload).toMatchObject({
+          message: "No tracked quota data yet.",
+          noticeType: "info",
+        });
+
+        // The synthesized completion records a turn boundary like a real one.
+        expect((yield* nextCommand(state)).type).toBe("get_entries");
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect(
     "steers into the active turn, surfaces extension selects, and suppresses the post-abort settle",
     () =>
       Effect.gen(function* () {
@@ -792,8 +933,16 @@ describe("makePiAdapter — scripted RPC process", () => {
                 }),
               ];
             case "prompt":
-              // The turn stays active: no agent_settled yet.
-              return [reply(command)];
+              // A live turn: assistant work started (blocks the adapter's
+              // synthetic command-turn completion), no agent_settled yet.
+              return [
+                reply(command),
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_end",
+                  message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+                },
+              ];
             case "steer":
               return [
                 reply(command),
@@ -888,11 +1037,15 @@ describe("makePiAdapter — scripted RPC process", () => {
           [answerRequestId]: "Allow",
         });
         // Boundary recording (get_entries) and the UI response race the drain
-        // order; the boundary job is queued at agent_settled, so it lands first.
-        expect((yield* nextCommand(state)).type).toBe("get_entries");
-        const uiResponse = yield* nextCommand(state);
-        expect(uiResponse.type).toBe("extension_ui_response");
-        expect(uiResponse.value).toBe("Allow");
+        // order; accept either ordering.
+        const firstAfterResponse = yield* nextCommand(state);
+        const secondAfterResponse = yield* nextCommand(state);
+        const drained = [firstAfterResponse, secondAfterResponse];
+        const boundaryCommand = drained.find((command) => command.type === "get_entries");
+        expect(boundaryCommand).toBeDefined();
+        const uiResponse = drained.find((command) => command.type === "extension_ui_response");
+        expect(uiResponse).toBeDefined();
+        expect(uiResponse!.value).toBe("Allow");
 
         // The steer's turn completes on agent_settled.
         yield* Deferred.await(settled);
@@ -910,6 +1063,11 @@ describe("makePiAdapter — scripted RPC process", () => {
           modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
         });
         expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        // The second turn also stays active (assistant work, no settle).
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("2 seconds");
+        yield* Effect.yieldNow;
 
         const aborted = yield* Deferred.make<undefined>();
         const abortCollector = yield* collectEventsUntil({
@@ -967,8 +1125,16 @@ describe("makePiAdapter — scripted RPC process", () => {
                 }),
               ];
             case "prompt":
-              // The turn stays active: no agent_settled yet.
-              return [reply(command)];
+              // A live turn: assistant work started (blocks the adapter's
+              // synthetic command-turn completion), no agent_settled yet.
+              return [
+                reply(command),
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_end",
+                  message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+                },
+              ];
             case "abort":
               return [{ type: "agent_settled" }, reply(command)];
             default:

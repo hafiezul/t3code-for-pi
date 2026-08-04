@@ -20,6 +20,8 @@ export type ComposerPromptSegment =
   | {
       type: "skill";
       name: string;
+      /** Exact authored token text (`$name` or `/skill:name`) — serialized verbatim. */
+      source: string;
     }
   | {
       type: "terminal-context";
@@ -148,7 +150,7 @@ function splitPromptTextIntoComposerSegments(text: string): ComposerPromptSegmen
         source: match.source,
       });
     } else {
-      segments.push({ type: "skill", name: match.value });
+      segments.push({ type: "skill", name: match.value, source: match.source });
     }
 
     cursor = match.end;

@@ -117,6 +117,7 @@ import {
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
+import { PiEnvironmentConfigSection } from "./PiEnvironmentConfigSection";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
   backgroundActivitySharedPolicySettings,
@@ -2194,6 +2195,15 @@ export function ProviderSettingsPanel() {
                   : undefined
               }
               isUpdating={showInlineUpdateButton ? isDriverUpdateRunning : undefined}
+              footerContent={
+                row.driver === ProviderDriverKind.make("pi") ? (
+                  <PiEnvironmentConfigSection
+                    key={`pi-config:${primaryEnvironment?.environmentId ?? "none"}`}
+                    environmentId={primaryEnvironment?.environmentId ?? null}
+                    instanceId={row.instanceId}
+                  />
+                ) : undefined
+              }
             />
           );
         })}

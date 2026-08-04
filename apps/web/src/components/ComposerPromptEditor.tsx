@@ -113,6 +113,8 @@ type SerializedComposerSkillNode = Spread<
     skillName: string;
     skillLabel?: string;
     skillDescription?: string;
+    /** Exact authored token text (`$name` or `/skill:name`); defaults to `$name`. */
+    source?: string;
     type: "composer-skill";
     version: 1;
   },
@@ -278,6 +280,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
   __skillName: string;
   __skillLabel: string;
   __skillDescription: string | null;
+  __source: string;
 
   static override getType(): string {
     return "composer-skill";
@@ -288,6 +291,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
       node.__skillName,
       node.__skillLabel,
       node.__skillDescription,
+      node.__source,
       node.__key,
     );
   }
@@ -297,6 +301,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
       serializedNode.skillName,
       serializedNode.skillLabel ?? serializedNode.skillName,
       serializedNode.skillDescription ?? null,
+      serializedNode.source,
     ).updateFromJSON(serializedNode);
   }
 
@@ -304,6 +309,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
     skillName: string,
     skillLabel: string,
     skillDescription: string | null,
+    source: string | undefined,
     key?: NodeKey,
   ) {
     super(key);
@@ -311,6 +317,9 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
     this.__skillName = normalizedSkillName;
     this.__skillLabel = skillLabel;
     this.__skillDescription = skillDescription;
+    // Serialize the exact authored form so pi's `/skill:name` invocation
+    // round-trips verbatim; legacy `$name` tokens keep their form.
+    this.__source = source !== undefined && source.length > 0 ? source : `$${normalizedSkillName}`;
   }
 
   override exportJSON(): SerializedComposerSkillNode {
@@ -319,6 +328,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
       skillName: this.__skillName,
       skillLabel: this.__skillLabel,
       ...(this.__skillDescription ? { skillDescription: this.__skillDescription } : {}),
+      ...(this.__source !== `$${this.__skillName}` ? { source: this.__source } : {}),
       type: "composer-skill",
       version: 1,
     };
@@ -335,7 +345,7 @@ class ComposerSkillNode extends DecoratorNode<React.ReactElement> {
   }
 
   override getTextContent(): string {
-    return `$${this.__skillName}`;
+    return this.__source;
   }
 
   override isInline(): true {
@@ -356,8 +366,11 @@ function $createComposerSkillNode(
   skillName: string,
   skillLabel: string,
   skillDescription: string | null,
+  source?: string,
 ): ComposerSkillNode {
-  return $applyNodeReplacement(new ComposerSkillNode(skillName, skillLabel, skillDescription));
+  return $applyNodeReplacement(
+    new ComposerSkillNode(skillName, skillLabel, skillDescription, source),
+  );
 }
 
 function ComposerTerminalContextDecorator(props: { context: TerminalContextDraft }) {
@@ -840,6 +853,7 @@ function $setComposerEditorPrompt(
           segment.name,
           metadata?.label ?? formatProviderSkillDisplayName({ name: segment.name }),
           metadata?.description ?? null,
+          segment.source,
         ),
       );
       continue;

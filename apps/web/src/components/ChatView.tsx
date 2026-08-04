@@ -5101,6 +5101,28 @@ function ChatViewContent(props: ChatViewProps) {
     [activePendingUserInput, composerRef],
   );
 
+  // Draft-only custom-answer setter for text-kind question panels. Unlike
+  // `onChangeActivePendingUserInputCustomAnswer`, it never touches the
+  // composer text or focus — the inline panel input owns the answer.
+  const onSetPendingUserInputCustomAnswer = useCallback(
+    (questionId: string, value: string) => {
+      if (!activePendingUserInput) {
+        return;
+      }
+      setPendingUserInputAnswersByRequestId((existing) => ({
+        ...existing,
+        [activePendingUserInput.requestId]: {
+          ...existing[activePendingUserInput.requestId],
+          [questionId]: setPendingUserInputCustomAnswer(
+            existing[activePendingUserInput.requestId]?.[questionId],
+            value,
+          ),
+        },
+      }));
+    },
+    [activePendingUserInput],
+  );
+
   const onAdvanceActivePendingUserInput = useCallback(() => {
     if (!activePendingUserInput || !activePendingProgress) {
       return;
@@ -5976,6 +5998,7 @@ function ChatViewContent(props: ChatViewProps) {
                             onChangeActivePendingUserInputCustomAnswer={
                               onChangeActivePendingUserInputCustomAnswer
                             }
+                            onSetPendingUserInputCustomAnswer={onSetPendingUserInputCustomAnswer}
                             onProviderModelSelect={onProviderModelSelect}
                             getModelDisabledReason={getModelDisabledReason}
                             toggleInteractionMode={toggleInteractionMode}

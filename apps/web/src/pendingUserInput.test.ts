@@ -40,6 +40,26 @@ const multiSelectQuestion = {
   multiSelect: true,
 } as const;
 
+const textQuestion = {
+  id: "commit_message",
+  header: "Commit",
+  question: "Write the commit message",
+  options: [],
+  multiSelect: false,
+  answerKind: "text",
+  placeholder: "e.g. fix(server): ...",
+} as const;
+
+const editorQuestion = {
+  id: "diff_explanation",
+  header: "Explain",
+  question: "Explain this diff",
+  options: [],
+  multiSelect: false,
+  answerKind: "editor",
+  initialValue: "This diff ...",
+} as const;
+
 describe("resolvePendingUserInputAnswer", () => {
   it("prefers a custom answer over selected options", () => {
     expect(
@@ -77,6 +97,32 @@ describe("resolvePendingUserInputAnswer", () => {
     ).toEqual({
       customAnswer: "doesn't matter",
     });
+  });
+
+  it("answers text-kind questions from the draft text only", () => {
+    expect(
+      resolvePendingUserInputAnswer(textQuestion, { customAnswer: "fix(server): close socket" }),
+    ).toBe("fix(server): close socket");
+  });
+
+  it("treats an empty text-kind answer as unanswered", () => {
+    expect(resolvePendingUserInputAnswer(textQuestion, { customAnswer: "" })).toBeNull();
+    expect(resolvePendingUserInputAnswer(textQuestion, { customAnswer: "   " })).toBeNull();
+  });
+
+  it("treats an editor prefill as answered once the draft carries it", () => {
+    expect(resolvePendingUserInputAnswer(editorQuestion, { customAnswer: "This diff ..." })).toBe(
+      "This diff ...",
+    );
+  });
+
+  it("ignores option selections for text-kind questions", () => {
+    expect(
+      resolvePendingUserInputAnswer(textQuestion, {
+        selectedOptionLabels: ["ignored"],
+        customAnswer: "actual answer",
+      }),
+    ).toBe("actual answer");
   });
 });
 
@@ -152,6 +198,22 @@ describe("buildPendingUserInputAnswers", () => {
 
   it("returns null when any question is unanswered", () => {
     expect(buildPendingUserInputAnswers([singleSelectQuestion], {})).toBeNull();
+  });
+
+  it("builds string answers for text-kind questions", () => {
+    expect(
+      buildPendingUserInputAnswers([textQuestion, editorQuestion], {
+        commit_message: { customAnswer: "fix(server): close socket" },
+        diff_explanation: { customAnswer: "This diff ..." },
+      }),
+    ).toEqual({
+      commit_message: "fix(server): close socket",
+      diff_explanation: "This diff ...",
+    });
+  });
+
+  it("returns null when a text-kind question has no text", () => {
+    expect(buildPendingUserInputAnswers([textQuestion], {})).toBeNull();
   });
 });
 

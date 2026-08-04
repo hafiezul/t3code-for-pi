@@ -273,6 +273,15 @@ function isInsideComposerFloatingLayer(element: Element): boolean {
   return element.closest(COMPOSER_FLOATING_LAYER_SELECTOR) !== null;
 }
 
+/**
+ * Menu label for a provider slash command. pi skill names carry the
+ * `skill:` prefix on the wire (invocation-ready); the menu shows the bare
+ * name instead — the inserted text stays verbatim.
+ */
+function formatProviderSlashCommandLabel(name: string): string {
+  return name.startsWith("skill:") ? `/${name.slice("skill:".length)}` : `/${name}`;
+}
+
 const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
   interactionMode: ProviderInteractionMode;
@@ -280,12 +289,20 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   showPlanToggle: boolean;
   planSidebarLabel: string;
   planSidebarOpen: boolean;
+  /** Live provider-extension status entries (e.g. pi `setStatus`), rendered as read-only pills. */
+  statusEntries: Thread["statusEntries"];
   onToggleInteractionMode: () => void;
   onRuntimeModeChange: (mode: RuntimeMode) => void;
   onTogglePlanSidebar: () => void;
 }) {
   const runtimeModeOption = runtimeModeConfig[props.runtimeMode];
   const RuntimeModeIcon = runtimeModeOption.icon;
+  const visibleStatusEntries = props.statusEntries.slice(0, 3);
+  const overflowStatusCount = Math.max(0, props.statusEntries.length - 3);
+  const overflowStatusText = props.statusEntries
+    .slice(3)
+    .map((entry) => entry.text)
+    .join("\n");
   const interactionModeTooltip =
     props.interactionMode === "plan"
       ? "Plan mode — click to return to normal build mode"
@@ -330,6 +347,29 @@ const ComposerFooterModeControls = memo(function ComposerFooterModeControls(prop
   return (
     <>
       <Separator orientation="vertical" className="mx-0.5 hidden h-4 sm:block" />
+
+      {props.statusEntries.length > 0 ? (
+        <>
+          {visibleStatusEntries.map((entry) => (
+            <span
+              key={entry.key}
+              title={entry.text}
+              className="flex h-7 max-w-40 shrink-0 items-center gap-1.5 rounded-full border border-border/60 bg-muted/25 px-2.5 text-xs font-medium text-muted-foreground/90"
+            >
+              <span className="size-1.5 shrink-0 rounded-full bg-primary/70" aria-hidden="true" />
+              <span className="truncate">{entry.text}</span>
+            </span>
+          ))}
+          {overflowStatusCount > 0 ? (
+            <span
+              title={overflowStatusText}
+              className="flex h-7 shrink-0 items-center rounded-full border border-border/60 bg-muted/25 px-2.5 text-xs font-medium text-muted-foreground/70"
+            >
+              +{overflowStatusCount} more
+            </span>
+          ) : null}
+        </>
+      ) : null}
 
       <Tooltip>
         <Select
@@ -542,7 +582,11 @@ export interface ChatComposerProps {
     isLastQuestion: boolean;
     canAdvance: boolean;
     customAnswer: string;
-    activeQuestion: { id: string; multiSelect?: boolean | undefined } | null;
+    activeQuestion: {
+      id: string;
+      multiSelect?: boolean | undefined;
+      answerKind?: "options" | "text" | "editor" | undefined;
+    } | null;
   } | null;
   activePendingResolvedAnswers: Record<string, unknown> | null;
   activePendingIsResponding: boolean;
@@ -603,6 +647,8 @@ export interface ChatComposerProps {
     expandedCursor: number,
     cursorAdjacentToMention: boolean,
   ) => void;
+  /** Draft-only answer setter for text-kind question panels (no composer touch). */
+  onSetPendingUserInputCustomAnswer: (questionId: string, value: string) => void;
 
   onProviderModelSelect: (instanceId: ProviderInstanceId, model: string) => void;
   getModelDisabledReason: (instanceId: ProviderInstanceId, model: string) => string | null;
@@ -681,6 +727,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     onAdvanceActivePendingUserInput,
     onPreviousActivePendingUserInputQuestion,
     onChangeActivePendingUserInputCustomAnswer,
+    onSetPendingUserInputCustomAnswer,
     onProviderModelSelect,
     getModelDisabledReason,
     toggleInteractionMode,
@@ -1090,7 +1137,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           type: "provider-slash-command" as const,
           provider: selectedProvider,
           command,
-          label: `/${command.name}`,
+          // pi skill names carry the `skill:` prefix on the wire; the menu
+          // shows the bare name (insertion stays invocation-ready).
+          label: formatProviderSlashCommandLabel(command.name),
           description: command.description ?? command.input?.hint ?? "Run provider command",
         }),
       );
@@ -1118,6 +1167,30 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     }
     return [];
   }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries.entries]);
+
+  // Chip metadata for the editor's skill tokens. pi's probe reports skills
+  // as slash commands (get_commands), not `ServerProviderSkill` rows, so
+  // synthesize entries so pi skill chips get a label and hover description
+  // like Claude's do.
+  const composerSkillMetadata = useMemo(() => {
+    const providerSkills = selectedProviderStatus?.skills ?? [];
+    if (selectedProvider !== ProviderDriverKind.make("pi")) {
+      return providerSkills;
+    }
+    const piSkillCommands = (selectedProviderStatus?.slashCommands ?? [])
+      .filter((command) => command.name.startsWith("skill:"))
+      .map((command) => {
+        const name = command.name.slice("skill:".length);
+        return {
+          name,
+          path: `skill:${name}`,
+          enabled: true,
+          ...(command.description ? { description: command.description } : {}),
+          ...(command.description ? { shortDescription: command.description } : {}),
+        };
+      });
+    return [...providerSkills, ...piSkillCommands];
+  }, [selectedProvider, selectedProviderStatus?.skills, selectedProviderStatus?.slashCommands]);
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger
@@ -1368,6 +1441,14 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   } | null>(null);
 
   useEffect(() => {
+    // Text kinds answer from the panel's own input field — the composer
+    // stops doubling as the answer field while one is active (the panel
+    // writes the draft directly via onSetPendingUserInputCustomAnswer).
+    const activeKind = activePendingProgress?.activeQuestion?.answerKind;
+    if (activeKind === "text" || activeKind === "editor") {
+      lastSyncedPendingInputRef.current = null;
+      return;
+    }
     const nextCustomAnswer = activePendingProgress?.customAnswer;
     if (typeof nextCustomAnswer !== "string") {
       lastSyncedPendingInputRef.current = null;
@@ -1543,7 +1624,17 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       cursorAdjacentToMention: boolean,
       terminalContextIds: string[],
     ) => {
-      if (activePendingProgress?.activeQuestion && pendingUserInputs.length > 0) {
+      // Text kinds answer from the panel's own input — the composer stops
+      // doubling as the answer field while one is active and behaves as a
+      // normal prompt instead (submit still resolves the prompt).
+      const activeKind = activePendingProgress?.activeQuestion?.answerKind;
+      const isTextKindQuestion =
+        (activeKind === "text" || activeKind === "editor") && pendingUserInputs.length > 0;
+      if (
+        activePendingProgress?.activeQuestion &&
+        pendingUserInputs.length > 0 &&
+        !isTextKindQuestion
+      ) {
         setComposerCursor(nextCursor);
         setComposerTrigger(
           cursorAdjacentToMention ? null : detectComposerTrigger(nextPrompt, expandedCursor),
@@ -1606,7 +1697,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       const nextExpandedCursor = expandCollapsedComposerCursor(next.text, nextCursor);
       promptRef.current = next.text;
       const activePendingQuestion = activePendingProgress?.activeQuestion;
-      if (activePendingQuestion && activePendingUserInput) {
+      const activeQuestionIsTextKind =
+        activePendingQuestion?.answerKind === "text" ||
+        activePendingQuestion?.answerKind === "editor";
+      if (activePendingQuestion && activePendingUserInput && !activeQuestionIsTextKind) {
         onChangeActivePendingUserInputCustomAnswer(
           activePendingQuestion.id,
           next.text,
@@ -2727,6 +2821,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   answers={activePendingDraftAnswers}
                   questionIndex={activePendingQuestionIndex}
                   onToggleOption={onSelectActivePendingUserInputOption}
+                  onChangeCustomAnswer={onSetPendingUserInputCustomAnswer}
                   onAdvance={onAdvanceActivePendingUserInput}
                 />
               </div>
@@ -2767,6 +2862,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                 answers={activePendingDraftAnswers}
                 questionIndex={activePendingQuestionIndex}
                 onToggleOption={onSelectActivePendingUserInputOption}
+                onChangeCustomAnswer={onSetPendingUserInputCustomAnswer}
                 onAdvance={onAdvanceActivePendingUserInput}
               />
               <div className="px-3 pb-3 sm:px-4">
@@ -3048,7 +3144,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                     ? composerTerminalContexts
                     : []
                 }
-                skills={selectedProviderStatus?.skills ?? []}
+                skills={composerSkillMetadata}
                 {...(showMobilePendingAnswerActions ? { className: "max-sm:pb-11" } : {})}
                 onRemoveTerminalContext={removeComposerTerminalContextFromDraft}
                 onChange={onPromptChange}
@@ -3190,6 +3286,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                       showPlanToggle={showPlanSidebarToggle}
                       planSidebarLabel={planSidebarLabel}
                       planSidebarOpen={planSidebarOpen}
+                      statusEntries={activeThread?.statusEntries ?? []}
                       onToggleInteractionMode={toggleInteractionMode}
                       onRuntimeModeChange={handleRuntimeModeChange}
                       onTogglePlanSidebar={togglePlanSidebar}

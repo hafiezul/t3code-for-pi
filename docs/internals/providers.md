@@ -39,9 +39,25 @@ contract research. Key points:
   `turn_end`); `abort` suppresses the settle that follows it. Pi has no tool-permission prompts, so
   T3's approval machinery is inert: threads run full-access, `respondToRequest` is a no-op, and
   launch-time project trust is the only gate.
-- **Events**: a table-driven translation maps `message_update` deltas, `tool_execution_*` items, and
-  extension UI requests (`select`/`confirm` → `user-input.requested`, `input`/`editor` declined)
-  onto orchestration events, with ignore-by-default fallthrough for unknown types.
+- **Events**: a table-driven translation maps `message_update` deltas, `tool_execution_*` items,
+  and extension UI requests onto orchestration events, with ignore-by-default fallthrough for
+  unknown types. Pi v2 (wayfinder #53) added: `select`/`confirm` and now `input`/`editor` dialogs
+  → `user-input.requested` (text kinds — `answerKind: "text" | "editor"` on the shared
+  `UserInputQuestion` contract, answered via `{value}`); `notify` → `extension.notice` activity
+  rows (tone `error` iff `noticeType === "error"`, else `info`); `setStatus` → `thread.statusEntries`
+  (keyed upsert, 20-key cap, cleared on `session.exited`). `setWidget`/`setTitle`/`set_editor_text`
+  stay dropped.
+- **Command inventory**: the probe runs a third step — `pi --mode rpc --no-session` with one
+  `get_commands` line at `serverConfig.cwd`, same cadence as the models probe, failure → empty
+  list. Maps to `ServerProviderSlashCommand` with a `group` (Extension / Skill / Prompt) set from
+  pi's `source`; deduped by lowercase name in pi execution precedence (extension → skill →
+  prompt). The web composer `/` menu renders one section per group.
+- **Config editor**: `server.piGetSettingsFile` / `server.piUpdateSettingsFile` RPCs read and write
+  the single global `<agentDir>/settings.json` (curated merge of `defaultProvider` /
+  `defaultModel` / `defaultThinkingLevel`, or strict raw whole-file replace; both return the
+  merged read-back). The settings UI is a collapsible "Pi environment config" section in the pi
+  instance card; the file is shared by all pi instances on the machine and applies to new sessions
+  only.
 - **Model picking**: the probe runs `pi --version` (gated at 0.80.5) then `pi --list-models`,
   flattened into `provider/model` slugs (first-`/` split; model ids may contain `/`) with a
   "Thinking" capability descriptor for rows pi marks `yes`. Mid-thread switches go through the RPC

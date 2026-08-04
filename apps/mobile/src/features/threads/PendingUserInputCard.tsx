@@ -1,4 +1,5 @@
 import type { ApprovalRequestId } from "@t3tools/contracts";
+import { useEffect, useRef } from "react";
 import { Pressable, View } from "react-native";
 
 import { AppText as Text, AppTextInput as TextInput } from "../../components/AppText";
@@ -24,6 +25,34 @@ export interface PendingUserInputCardProps {
 }
 
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
+  const requestId = props.pendingUserInput.requestId;
+  const seededEditorQuestionIdsRef = useRef<Set<string>>(new Set());
+
+  // Seed editor-kind drafts with their prefill once, so the question starts
+  // answered (accepting it as-is sends it; clearing the field makes it
+  // unanswered again). Per request — a new dialog starts unseeded.
+  useEffect(() => {
+    seededEditorQuestionIdsRef.current = new Set();
+  }, [requestId]);
+
+  useEffect(() => {
+    const seeded = seededEditorQuestionIdsRef.current;
+    for (const question of props.pendingUserInput.questions) {
+      if (question.answerKind !== "editor" || !question.initialValue) {
+        continue;
+      }
+      const key = `${requestId}:${question.id}`;
+      if (seeded.has(key)) {
+        continue;
+      }
+      if (props.drafts[question.id]?.customAnswer !== undefined) {
+        continue;
+      }
+      seeded.add(key);
+      props.onChangeCustomAnswer(requestId, question.id, question.initialValue);
+    }
+  }, [props.drafts, props.onChangeCustomAnswer, props.pendingUserInput.questions, requestId]);
+
   return (
     <View className="gap-2.5 rounded-[20px] border border-neutral-200 bg-neutral-100/80 p-4 dark:border-white/6 dark:bg-neutral-900/80">
       <Text className="font-t3-bold text-2xs uppercase tracking-[1.1px] text-sky-700 dark:text-sky-300">
@@ -34,6 +63,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
       </Text>
       {props.pendingUserInput.questions.map((question) => {
         const draft = props.drafts[question.id];
+        const isTextKind = question.answerKind === "text" || question.answerKind === "editor";
         return (
           <View key={question.id} className="gap-2 pt-1">
             <Text className="font-t3-bold text-xs uppercase tracking-[1px] text-neutral-500 dark:text-neutral-500">
@@ -42,49 +72,69 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
             <Text className="font-sans text-base leading-snug text-neutral-950 dark:text-neutral-50">
               {question.question}
             </Text>
-            <View className="flex-row flex-wrap gap-2.5">
-              {question.options.map((option) => {
-                const selected =
-                  draft?.selectedOptionLabel === option.label && !draft.customAnswer?.trim().length;
-                return (
-                  <Pressable
-                    key={option.label}
-                    className={cn(
-                      "rounded-full border px-3 py-2.5 ",
-                      selected
-                        ? "border-blue-300/50 bg-blue-50 dark:border-blue-400/28 dark:bg-blue-400/14"
-                        : "border-neutral-200 bg-white dark:border-white/6 dark:bg-neutral-950/70",
-                    )}
-                    onPress={() =>
-                      props.onSelectOption(
-                        props.pendingUserInput.requestId,
-                        question.id,
-                        option.label,
-                      )
-                    }
-                  >
-                    <Text
-                      className={cn(
-                        "font-t3-bold text-sm",
-                        selected
-                          ? "text-sky-700 dark:text-sky-300"
-                          : "text-neutral-600 dark:text-neutral-300",
-                      )}
-                    >
-                      {option.label}
-                    </Text>
-                  </Pressable>
-                );
-              })}
-            </View>
-            <TextInput
-              value={draft?.customAnswer ?? ""}
-              onChangeText={(value) =>
-                props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
-              }
-              placeholder="Or type a custom answer"
-              className="min-h-[54px] rounded-2xl border border-neutral-200 bg-white px-3.5 py-3 font-sans text-base text-neutral-950 dark:border-white/8 dark:bg-neutral-950/70 dark:text-neutral-50"
-            />
+            {isTextKind ? (
+              <TextInput
+                value={
+                  draft?.customAnswer ??
+                  (question.answerKind === "editor" ? (question.initialValue ?? "") : "")
+                }
+                onChangeText={(value) => props.onChangeCustomAnswer(requestId, question.id, value)}
+                placeholder={
+                  question.placeholder ??
+                  (question.answerKind === "editor" ? "Write your answer…" : "Type your answer…")
+                }
+                multiline={question.answerKind === "editor"}
+                textAlignVertical={question.answerKind === "editor" ? "top" : undefined}
+                className="min-h-[54px] rounded-2xl border border-neutral-200 bg-white px-3.5 py-3 font-sans text-base text-neutral-950 dark:border-white/8 dark:bg-neutral-950/70 dark:text-neutral-50"
+              />
+            ) : (
+              <>
+                <View className="flex-row flex-wrap gap-2.5">
+                  {question.options.map((option) => {
+                    const selected =
+                      draft?.selectedOptionLabel === option.label &&
+                      !draft.customAnswer?.trim().length;
+                    return (
+                      <Pressable
+                        key={option.label}
+                        className={cn(
+                          "rounded-full border px-3 py-2.5 ",
+                          selected
+                            ? "border-blue-300/50 bg-blue-50 dark:border-blue-400/28 dark:bg-blue-400/14"
+                            : "border-neutral-200 bg-white dark:border-white/6 dark:bg-neutral-950/70",
+                        )}
+                        onPress={() =>
+                          props.onSelectOption(
+                            props.pendingUserInput.requestId,
+                            question.id,
+                            option.label,
+                          )
+                        }
+                      >
+                        <Text
+                          className={cn(
+                            "font-t3-bold text-sm",
+                            selected
+                              ? "text-sky-700 dark:text-sky-300"
+                              : "text-neutral-600 dark:text-neutral-300",
+                          )}
+                        >
+                          {option.label}
+                        </Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                <TextInput
+                  value={draft?.customAnswer ?? ""}
+                  onChangeText={(value) =>
+                    props.onChangeCustomAnswer(props.pendingUserInput.requestId, question.id, value)
+                  }
+                  placeholder="Or type a custom answer"
+                  className="min-h-[54px] rounded-2xl border border-neutral-200 bg-white px-3.5 py-3 font-sans text-base text-neutral-950 dark:border-white/8 dark:bg-neutral-950/70 dark:text-neutral-50"
+                />
+              </>
+            )}
           </View>
         );
       })}

@@ -18,7 +18,11 @@ export interface CollectComposerInlineTokensOptions {
   readonly preserveTrailingFrom?: ReadonlyArray<ComposerInlineToken>;
 }
 
-const SKILL_TOKEN_REGEX = /(^|\s)\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s)/g;
+// `$name` (Claude-style shorthand) and `/skill:name` (pi's invocation) both
+// tokenize as skill chips; `source` keeps the exact authoring form so the
+// serialized prompt round-trips verbatim.
+const SKILL_TOKEN_REGEX =
+  /(^|\s)(?:\$([a-zA-Z][a-zA-Z0-9:_-]*)|(\/skill:[a-zA-Z][a-zA-Z0-9:_-]*))(?=\s)/g;
 const MENTION_TOKEN_REGEX = /(^|\s)@(?:"((?:\\.|[^"\\])*)"|([^\s@"]+))(?=\s)/g;
 const FILE_LINK_TOKEN_REGEX = /(^|\s)\[((?:\\.|[^\]\\])*)\]\(([^)\s]+)\)(?=\s)/g;
 const URI_SCHEME_REGEX = /^[A-Za-z][A-Za-z0-9+.-]*:/;
@@ -89,7 +93,8 @@ export function collectComposerInlineTokens(
   for (const match of text.matchAll(SKILL_TOKEN_REGEX)) {
     const fullMatch = match[0];
     const prefix = match[1] ?? "";
-    const value = match[2] ?? "";
+    const rawValue = match[2] ?? match[3] ?? "";
+    const value = rawValue.startsWith("/skill:") ? rawValue.slice("/skill:".length) : rawValue;
     if (!value) {
       continue;
     }
