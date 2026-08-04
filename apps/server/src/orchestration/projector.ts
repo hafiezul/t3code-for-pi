@@ -24,6 +24,8 @@ import {
   ThreadRuntimeModeSetPayload,
   ThreadSettledPayload,
   ThreadSnoozedPayload,
+  ThreadStatusClearedPayload,
+  ThreadStatusUpdatedPayload,
   ThreadUnarchivedPayload,
   ThreadUnsettledPayload,
   ThreadUnsnoozedPayload,
@@ -35,6 +37,7 @@ import {
 type ThreadPatch = Partial<Omit<OrchestrationThread, "id" | "projectId">>;
 const MAX_THREAD_MESSAGES = 2_000;
 const MAX_THREAD_CHECKPOINTS = 500;
+const MAX_THREAD_STATUS_ENTRIES = 20;
 
 function checkpointStatusToLatestTurnState(status: "ready" | "missing" | "error") {
   if (status === "error") return "error" as const;
@@ -747,6 +750,69 @@ export function projectEvent(
             threads: updateThread(nextBase.threads, payload.threadId, {
               activities,
               updatedAt: event.occurredAt,
+            }),
+          };
+        }),
+      );
+
+    case "thread.status.updated":
+      return decodeForEvent(ThreadStatusUpdatedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread) {
+            return nextBase;
+          }
+
+          const existing = thread.statusEntries.find((entry) => entry.key === payload.statusKey);
+          if (payload.statusText === null) {
+            if (existing === undefined) {
+              // No-op skip: nothing to remove, no churn.
+              return nextBase;
+            }
+            return {
+              ...nextBase,
+              threads: updateThread(nextBase.threads, payload.threadId, {
+                statusEntries: thread.statusEntries.filter(
+                  (entry) => entry.key !== payload.statusKey,
+                ),
+              }),
+            };
+          }
+
+          if (existing !== undefined && existing.text === payload.statusText) {
+            // No-op skip: identical key+text — no event churn (the
+            // ingestion normally prevents this, the projector is the
+            // backstop for races).
+            return nextBase;
+          }
+
+          const entries = [
+            ...thread.statusEntries.filter((entry) => entry.key !== payload.statusKey),
+            { key: payload.statusKey, text: payload.statusText, updatedAt: payload.updatedAt },
+          ]
+            .toSorted((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+            .slice(-MAX_THREAD_STATUS_ENTRIES);
+
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              statusEntries: entries,
+            }),
+          };
+        }),
+      );
+
+    case "thread.status.cleared":
+      return decodeForEvent(ThreadStatusClearedPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => {
+          const thread = nextBase.threads.find((entry) => entry.id === payload.threadId);
+          if (!thread || thread.statusEntries.length === 0) {
+            return nextBase;
+          }
+          return {
+            ...nextBase,
+            threads: updateThread(nextBase.threads, payload.threadId, {
+              statusEntries: [],
             }),
           };
         }),

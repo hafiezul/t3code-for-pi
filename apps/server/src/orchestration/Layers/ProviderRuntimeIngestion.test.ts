@@ -3478,3 +3478,299 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread.session?.lastError).toBe("runtime still processed");
   });
 });
+
+describe("ProviderRuntimeIngestion — pi extension UI events", () => {
+  let runtime: ManagedRuntime.ManagedRuntime<
+    OrchestrationEngineService | ProviderRuntimeIngestionService | ProjectionSnapshotQuery,
+    unknown
+  > | null = null;
+  let scope: Scope.Closeable | null = null;
+  const tempDirs: string[] = [];
+
+  function makeTempDir(prefix: string): string {
+    const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), prefix));
+    tempDirs.push(dir);
+    return dir;
+  }
+
+  afterEach(async () => {
+    if (scope) {
+      await Effect.runPromise(Scope.close(scope, Exit.void));
+    }
+    scope = null;
+    if (runtime) {
+      await runtime.dispose();
+    }
+    runtime = null;
+    for (const dir of tempDirs.splice(0)) {
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  async function createHarness() {
+    const workspaceRoot = makeTempDir("t3-provider-project-");
+    NodeFS.mkdirSync(NodePath.join(workspaceRoot, ".git"));
+    const provider = createProviderServiceHarness();
+    const orchestrationLayer = OrchestrationEngineLive.pipe(
+      Layer.provide(OrchestrationProjectionSnapshotQueryLive),
+      Layer.provide(OrchestrationProjectionPipelineLive),
+      Layer.provide(OrchestrationEventStoreLive),
+      Layer.provide(OrchestrationCommandReceiptRepositoryLive),
+      Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const projectionSnapshotLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
+      Layer.provide(RepositoryIdentityResolver.layer),
+      Layer.provide(SqlitePersistenceMemory),
+    );
+    const layer = ProviderRuntimeIngestionLive.pipe(
+      Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(projectionSnapshotLayer),
+      Layer.provideMerge(SqlitePersistenceMemory),
+      Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),
+      Layer.provideMerge(makeTestServerSettingsLayer()),
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(NodeServices.layer),
+    );
+    runtime = ManagedRuntime.make(layer);
+    const engine = await runtime.runPromise(Effect.service(OrchestrationEngineService));
+    const snapshotQuery = await runtime.runPromise(Effect.service(ProjectionSnapshotQuery));
+    const ingestion = await runtime.runPromise(Effect.service(ProviderRuntimeIngestionService));
+    scope = await Effect.runPromise(Scope.make("sequential"));
+    await Effect.runPromise(ingestion.start().pipe(Scope.provide(scope)));
+
+    const createdAt = "2026-01-01T00:00:00.000Z";
+    await Effect.runPromise(
+      engine.dispatch({
+        type: "project.create",
+        commandId: CommandId.make("cmd-pi-project-create"),
+        projectId: asProjectId("project-1"),
+        title: "Provider Project",
+        workspaceRoot,
+        defaultModelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "anthropic/claude-sonnet-4-6",
+        },
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      engine.dispatch({
+        type: "thread.create",
+        commandId: CommandId.make("cmd-pi-thread-create"),
+        threadId: ThreadId.make("thread-1"),
+        projectId: asProjectId("project-1"),
+        title: "Thread",
+        modelSelection: {
+          instanceId: ProviderInstanceId.make("pi"),
+          model: "anthropic/claude-sonnet-4-6",
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        branch: null,
+        worktreePath: null,
+        createdAt,
+      }),
+    );
+    await Effect.runPromise(
+      engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("cmd-pi-session-seed"),
+        threadId: ThreadId.make("thread-1"),
+        session: {
+          threadId: ThreadId.make("thread-1"),
+          status: "ready",
+          providerName: "pi",
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          updatedAt: createdAt,
+          lastError: null,
+        },
+        createdAt,
+      }),
+    );
+
+    return {
+      engine,
+      readModel: () => Effect.runPromise(snapshotQuery.getSnapshot()),
+      emit: provider.emit,
+      drain: () => Effect.runPromise(ingestion.drain),
+    };
+  }
+
+  it("maps extension.notice into an extension.notice activity row", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "extension.notice",
+      eventId: asEventId("evt-notice-warning"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:01.000Z",
+      payload: { message: "Command blocked by user", noticeType: "warning" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "extension.notice"),
+    );
+    const activity = thread.activities.find((entry) => entry.kind === "extension.notice");
+    expect(activity).toMatchObject({
+      tone: "info",
+      summary: "Command blocked by user",
+      payload: { message: "Command blocked by user", noticeType: "warning" },
+    });
+    await harness.drain();
+  });
+
+  it("gives error notices the destructive tone", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "extension.notice",
+      eventId: asEventId("evt-notice-error"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:02.000Z",
+      payload: { message: "Something failed", noticeType: "error" },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some((activity) => activity.kind === "extension.notice"),
+    );
+    const activity = thread.activities.find((entry) => entry.kind === "extension.notice");
+    expect(activity?.tone).toBe("error");
+    await harness.drain();
+  });
+
+  it("projects extension.status upserts into statusEntries and skips no-op repeats", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-1"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:03.000Z",
+      payload: { statusKey: "my-ext", statusText: "Turn 3 running..." },
+    });
+
+    const thread = await waitForThread(
+      harness.readModel,
+      (entry) => entry.statusEntries.length === 1,
+    );
+    expect(thread.statusEntries[0]).toEqual({
+      key: "my-ext",
+      text: "Turn 3 running...",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+    });
+
+    // Same key + text again: the ingestion skips the dispatch entirely, so
+    // the entry's updatedAt is untouched (zero churn).
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-1-repeat"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:04.000Z",
+      payload: { statusKey: "my-ext", statusText: "Turn 3 running..." },
+    });
+    await Effect.runPromise(Effect.yieldNow);
+    await Effect.runPromise(Effect.yieldNow);
+    const afterRepeat = await harness.readModel();
+    const threadAfter = afterRepeat.threads.find((entry) => entry.id === asThreadId("thread-1"));
+    expect(threadAfter?.statusEntries).toHaveLength(1);
+    expect(threadAfter?.statusEntries[0]?.updatedAt).toBe("2026-01-01T00:00:03.000Z");
+
+    // A different text upserts the entry with the new timestamp.
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-2"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:05.000Z",
+      payload: { statusKey: "my-ext", statusText: "Done" },
+    });
+    const threadUpdated = await waitForThread(
+      harness.readModel,
+      (entry) => entry.statusEntries[0]?.text === "Done",
+    );
+    expect(threadUpdated.statusEntries[0]?.updatedAt).toBe("2026-01-01T00:00:05.000Z");
+
+    // Explicit null removes the entry.
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-clear"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:06.000Z",
+      payload: { statusKey: "my-ext", statusText: null },
+    });
+    await waitForThread(harness.readModel, (entry) => entry.statusEntries.length === 0);
+    await harness.drain();
+  });
+
+  it("clears all status entries the moment the pi session exits", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-before-exit"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:07.000Z",
+      payload: { statusKey: "ext-a", statusText: "busy" },
+    });
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-before-exit-2"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:08.000Z",
+      payload: { statusKey: "ext-b", statusText: "working" },
+    });
+    await waitForThread(harness.readModel, (entry) => entry.statusEntries.length === 2);
+
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-pi-session-exited"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:09.000Z",
+      payload: { reason: "process exited" },
+    });
+
+    await waitForThread(harness.readModel, (entry) => entry.statusEntries.length === 0);
+    await harness.drain();
+  });
+
+  it("does not touch status entries when a non-pi session exits", async () => {
+    const harness = await createHarness();
+
+    harness.emit({
+      type: "extension.status",
+      eventId: asEventId("evt-status-keep"),
+      provider: ProviderDriverKind.make("pi"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:10.000Z",
+      payload: { statusKey: "ext-a", statusText: "busy" },
+    });
+    await waitForThread(harness.readModel, (entry) => entry.statusEntries.length === 1);
+
+    harness.emit({
+      type: "session.exited",
+      eventId: asEventId("evt-codex-session-exited"),
+      provider: ProviderDriverKind.make("codex"),
+      threadId: asThreadId("thread-1"),
+      createdAt: "2026-01-01T00:00:11.000Z",
+      payload: { reason: "process exited" },
+    });
+    await Effect.runPromise(Effect.yieldNow);
+    await Effect.runPromise(Effect.yieldNow);
+    const after = await harness.readModel();
+    const thread = after.threads.find((entry) => entry.id === asThreadId("thread-1"));
+    // Status entries survive non-pi session exits (no churn for providers
+    // that never set them).
+    expect(thread?.statusEntries).toHaveLength(1);
+    await harness.drain();
+  });
+});

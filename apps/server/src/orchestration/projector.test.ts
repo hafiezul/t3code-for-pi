@@ -97,6 +97,7 @@ describe("orchestration projector", () => {
         messages: [],
         proposedPlans: [],
         activities: [],
+        statusEntries: [],
         checkpoints: [],
         session: null,
       },

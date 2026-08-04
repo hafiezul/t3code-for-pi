@@ -80,6 +80,7 @@ export function applyThreadDetailEvent(
           messages: [],
           proposedPlans: [],
           activities: [],
+          statusEntries: [],
           checkpoints: [],
           session: null,
         },
@@ -520,6 +521,50 @@ export function applyThreadDetailEvent(
         kind: "updated",
         thread: { ...thread, activities, updatedAt: event.occurredAt },
       };
+    }
+
+    // ── Extension status entries ────────────────────────────────────
+    case "thread.status.updated": {
+      const existing = thread.statusEntries.find((entry) => entry.key === event.payload.statusKey);
+      if (event.payload.statusText === null) {
+        if (existing === undefined) {
+          return { kind: "unchanged" };
+        }
+        return {
+          kind: "updated",
+          thread: {
+            ...thread,
+            statusEntries: thread.statusEntries.filter(
+              (entry) => entry.key !== event.payload.statusKey,
+            ),
+          },
+        };
+      }
+      if (existing !== undefined && existing.text === event.payload.statusText) {
+        // No-op skip: identical key+text — no re-render.
+        return { kind: "unchanged" };
+      }
+      return {
+        kind: "updated",
+        thread: {
+          ...thread,
+          statusEntries: [
+            ...thread.statusEntries.filter((entry) => entry.key !== event.payload.statusKey),
+            {
+              key: event.payload.statusKey,
+              text: event.payload.statusText,
+              updatedAt: event.payload.updatedAt,
+            },
+          ],
+        },
+      };
+    }
+
+    case "thread.status.cleared": {
+      if (thread.statusEntries.length === 0) {
+        return { kind: "unchanged" };
+      }
+      return { kind: "updated", thread: { ...thread, statusEntries: [] } };
     }
 
     // ── Events that don't mutate thread state directly ──────────────

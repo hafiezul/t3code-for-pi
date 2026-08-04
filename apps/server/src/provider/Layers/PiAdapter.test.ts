@@ -1186,4 +1186,283 @@ describe("makePiAdapter — scripted RPC process", () => {
       yield* adapter.stopAll();
     }),
   );
+
+  it.effect(
+    "surfaces input/editor dialogs as text kinds and notify/setStatus as extension events",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_steering_mode":
+            case "set_follow_up_mode":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // One turn that fires every extension-UI request kind.
+              return [
+                reply(command),
+                {
+                  type: "extension_ui_request",
+                  id: "ui-input-1",
+                  method: "input",
+                  title: "Enter a value",
+                  placeholder: "type something...",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-editor-1",
+                  method: "editor",
+                  title: "Edit some text",
+                  prefill: "Line 1\nLine 2",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-notify-1",
+                  method: "notify",
+                  message: "Command blocked by user",
+                  notifyType: "warning",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-status-1",
+                  method: "setStatus",
+                  statusKey: "my-ext",
+                  statusText: "Turn 3 running...",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-status-2",
+                  method: "setStatus",
+                  statusKey: "my-ext",
+                  // Omitted statusText = clear; the adapter normalizes to null.
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-widget-1",
+                  method: "setWidget",
+                  widgetKey: "w",
+                },
+                { type: "agent_settled" },
+              ];
+            case "get_entries":
+              return [
+                reply(command, {
+                  data: { entries: [], leafId: "leaf-1" },
+                }),
+              ];
+            case "extension_ui_response":
+              return [reply(command)];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const uiRequested = yield* Deferred.make<undefined>();
+        const noticeSeen = yield* Deferred.make<undefined>();
+        const statusSeen = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled, uiRequested, noticeSeen, statusSeen },
+          matches: (event) =>
+            event.type === "turn.completed" || event.type === "session.exited"
+              ? "settled"
+              : event.type === "user-input.requested"
+                ? "uiRequested"
+                : event.type === "extension.notice"
+                  ? "noticeSeen"
+                  : event.type === "extension.status"
+                    ? "statusSeen"
+                    : undefined,
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/pi-project",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        yield* adapter.sendTurn({
+          threadId,
+          input: "do the thing",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        yield* Deferred.await(uiRequested);
+        yield* Deferred.await(noticeSeen);
+        yield* Deferred.await(statusSeen);
+        // agent_settled lands after every extension_ui_request in the script,
+        // so awaiting it guarantees all events reached the collector.
+        yield* Deferred.await(settled);
+        const events = yield* Ref.get(collector.events);
+
+        const inputEvents = events.filter((event) => event.type === "user-input.requested");
+        expect(inputEvents).toHaveLength(2);
+        const questions = inputEvents.flatMap((event) =>
+          event.type === "user-input.requested" ? event.payload.questions : [],
+        );
+        expect(questions).toHaveLength(2);
+        expect(questions[0]).toMatchObject({
+          header: "Pi extension",
+          question: "Enter a value",
+          answerKind: "text",
+          placeholder: "type something...",
+          options: [],
+        });
+        expect(questions[1]).toMatchObject({
+          question: "Edit some text",
+          answerKind: "editor",
+          initialValue: "Line 1\nLine 2",
+          options: [],
+        });
+
+        const notice = events.find((event) => event.type === "extension.notice");
+        expect(notice).toBeDefined();
+        if (notice?.type !== "extension.notice") {
+          throw new Error("expected extension.notice");
+        }
+        expect(notice.payload).toEqual({
+          message: "Command blocked by user",
+          noticeType: "warning",
+        });
+
+        const statuses = events.filter((event) => event.type === "extension.status");
+        expect(statuses).toHaveLength(2);
+        if (statuses[0]?.type !== "extension.status" || statuses[1]?.type !== "extension.status") {
+          throw new Error("expected extension.status events");
+        }
+        expect(statuses[0].payload).toEqual({
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+        });
+        // Omitted statusText normalizes to an explicit null clear.
+        expect(statuses[1].payload).toEqual({ statusKey: "my-ext", statusText: null });
+
+        // setWidget stays dropped: no event, no response.
+        expect(events.some((event) => event.type === "extension.notice")).toBe(true);
+
+        // Answer the input dialog: a non-empty value is sent as {value}.
+        const answerRequestId = ApprovalRequestId.make(questions[0]!.id);
+        yield* adapter.respondToUserInput(threadId, answerRequestId, {
+          [answerRequestId]: "typed answer",
+        });
+        let uiResponse = yield* nextCommand(state);
+        if (uiResponse.type === "get_entries") {
+          uiResponse = yield* nextCommand(state);
+        }
+        expect(uiResponse.type).toBe("extension_ui_response");
+        expect(uiResponse.value).toBe("typed answer");
+        expect(uiResponse.cancelled).toBeUndefined();
+
+        yield* adapter.stopAll();
+      }),
+  );
+
+  it.effect("rejects empty answers to text dialogs", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_steering_mode":
+          case "set_follow_up_mode":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command),
+              {
+                type: "extension_ui_request",
+                id: "ui-input-1",
+                method: "input",
+                title: "Enter a value",
+              },
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+      const settled = yield* Deferred.make<undefined>();
+      const uiRequested = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled, uiRequested },
+        matches: (event) =>
+          event.type === "turn.completed" || event.type === "session.exited"
+            ? "settled"
+            : event.type === "user-input.requested"
+              ? "uiRequested"
+              : undefined,
+      });
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/pi-project",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* adapter.sendTurn({
+        threadId,
+        input: "do the thing",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+
+      // The dialog must be registered before responding (the reader fiber
+      // processes extension_ui_request asynchronously).
+      yield* Deferred.await(uiRequested);
+      const answerRequestId = ApprovalRequestId.make("ui-input-1");
+      const exit = yield* adapter
+        .respondToUserInput(threadId, answerRequestId, { [answerRequestId]: "   " })
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const error = Cause.squash(exit.cause) as ProviderAdapterRequestError;
+        expect(error.message).toMatch(/non-empty answer/);
+      }
+      // The pending request stays pending: no response was written.
+      yield* adapter.stopAll();
+    }),
+  );
 });

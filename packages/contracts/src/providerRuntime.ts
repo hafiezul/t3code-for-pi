@@ -194,6 +194,8 @@ const ProviderRuntimeEventType = Schema.Literals([
   "files.persisted",
   "runtime.warning",
   "runtime.error",
+  "extension.notice",
+  "extension.status",
 ]);
 export type ProviderRuntimeEventType = typeof ProviderRuntimeEventType.Type;
 
@@ -245,6 +247,8 @@ const FilesPersistedType = Schema.Literal("files.persisted");
 const ToolDeniedType = Schema.Literal("tool.denied");
 const RuntimeWarningType = Schema.Literal("runtime.warning");
 const RuntimeErrorType = Schema.Literal("runtime.error");
+const ExtensionNoticeType = Schema.Literal("extension.notice");
+const ExtensionStatusType = Schema.Literal("extension.status");
 
 const ProviderRuntimeEventBase = Schema.Struct({
   eventId: EventId,
@@ -439,6 +443,9 @@ const UserInputQuestionOption = Schema.Struct({
 });
 export type UserInputQuestionOption = typeof UserInputQuestionOption.Type;
 
+export const UserInputAnswerKind = Schema.Literals(["options", "text", "editor"]);
+export type UserInputAnswerKind = typeof UserInputAnswerKind.Type;
+
 export const UserInputQuestion = Schema.Struct({
   id: TrimmedNonEmptyStringSchema,
   header: TrimmedNonEmptyStringSchema,
@@ -447,6 +454,15 @@ export const UserInputQuestion = Schema.Struct({
   multiSelect: Schema.optional(Schema.Boolean).pipe(
     Schema.withConstructorDefault(Effect.succeed(false)),
   ),
+  // How the user's answer is entered. Options questions render a picker;
+  // text renders a single-line input (placeholder); editor a prefilled
+  // multiline textarea (initialValue). Defaults to "options" so existing
+  // emitters (Codex, Claude, Cursor, Grok, OpenCode) are untouched.
+  answerKind: Schema.optional(UserInputAnswerKind).pipe(
+    Schema.withDecodingDefault(Effect.succeed("options")),
+  ),
+  placeholder: Schema.optional(TrimmedNonEmptyStringSchema),
+  initialValue: Schema.optional(TrimmedNonEmptyStringSchema),
 });
 export type UserInputQuestion = typeof UserInputQuestion.Type;
 
@@ -611,6 +627,22 @@ const RuntimeErrorPayload = Schema.Struct({
   detail: Schema.optional(Schema.Unknown),
 });
 export type RuntimeErrorPayload = typeof RuntimeErrorPayload.Type;
+
+const ExtensionNoticePayload = Schema.Struct({
+  message: TrimmedNonEmptyStringSchema,
+  noticeType: Schema.Literals(["info", "warning", "error"]).pipe(
+    Schema.withDecodingDefault(Effect.succeed("info")),
+  ),
+});
+export type ExtensionNoticePayload = typeof ExtensionNoticePayload.Type;
+
+const ExtensionStatusPayload = Schema.Struct({
+  statusKey: TrimmedNonEmptyStringSchema,
+  // Explicit null = clear the entry for this key (pi's setStatus omits
+  // statusText to clear; the adapter normalizes to null).
+  statusText: Schema.NullOr(TrimmedNonEmptyStringSchema),
+});
+export type ExtensionStatusPayload = typeof ExtensionStatusPayload.Type;
 
 const ProviderRuntimeSessionStartedEvent = Schema.Struct({
   ...ProviderRuntimeEventBase.fields,
@@ -965,6 +997,20 @@ const ProviderRuntimeErrorEvent = Schema.Struct({
 });
 export type ProviderRuntimeErrorEvent = typeof ProviderRuntimeErrorEvent.Type;
 
+const ProviderRuntimeExtensionNoticeEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ExtensionNoticeType,
+  payload: ExtensionNoticePayload,
+});
+export type ProviderRuntimeExtensionNoticeEvent = typeof ProviderRuntimeExtensionNoticeEvent.Type;
+
+const ProviderRuntimeExtensionStatusEvent = Schema.Struct({
+  ...ProviderRuntimeEventBase.fields,
+  type: ExtensionStatusType,
+  payload: ExtensionStatusPayload,
+});
+export type ProviderRuntimeExtensionStatusEvent = typeof ProviderRuntimeExtensionStatusEvent.Type;
+
 export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeSessionStartedEvent,
   ProviderRuntimeSessionConfiguredEvent,
@@ -1014,6 +1060,8 @@ export const ProviderRuntimeEventV2 = Schema.Union([
   ProviderRuntimeToolDeniedEvent,
   ProviderRuntimeWarningEvent,
   ProviderRuntimeErrorEvent,
+  ProviderRuntimeExtensionNoticeEvent,
+  ProviderRuntimeExtensionStatusEvent,
 ]);
 export type ProviderRuntimeEventV2 = typeof ProviderRuntimeEventV2.Type;
 

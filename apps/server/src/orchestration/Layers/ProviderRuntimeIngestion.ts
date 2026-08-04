@@ -659,6 +659,27 @@ export function runtimeEventToActivities(
       ];
     }
 
+    case "extension.notice": {
+      return [
+        {
+          id: event.eventId,
+          createdAt: event.createdAt,
+          // Severity-aware chrome: error keeps the destructive row; info and
+          // warning both render as regular work-log rows (the noticeType in
+          // the payload keys web/mobile per-kind styling, see #58).
+          tone: event.payload.noticeType === "error" ? "error" : "info",
+          kind: "extension.notice",
+          summary: truncateDetail(event.payload.message, 120),
+          payload: {
+            message: truncateDetail(event.payload.message),
+            noticeType: event.payload.noticeType,
+          },
+          turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
     case "item.started": {
       if (!isToolLifecycleItemType(event.payload.itemType)) {
         return [];
@@ -1673,6 +1694,47 @@ const make = Effect.gen(function* () {
 
       if (event.type === "session.exited") {
         yield* clearTurnStateForSession(thread.id);
+        // The pi extension UI is gone the moment its session dies: clear all
+        // status chips immediately (no timers; a restarting session's
+        // extension re-sets them). Other providers never set status entries,
+        // so the clear is gated to pi to avoid event churn per session exit.
+        if (event.provider === "pi") {
+          const detailedThread = yield* getLoadedThreadDetail();
+          if ((detailedThread?.statusEntries.length ?? 0) > 0) {
+            yield* orchestrationEngine.dispatch({
+              type: "thread.status.clear",
+              commandId: yield* providerCommandId(event, "thread-status-clear"),
+              threadId: thread.id,
+              createdAt: now,
+            });
+          }
+        }
+      }
+
+      if (event.type === "extension.status") {
+        // Upsert-by-key with a no-op skip: key+text unchanged means no
+        // event at all (zero state churn, zero re-render). The read model
+        // is the same view clients render, so the skip is exact in the
+        // common path; a race only costs a redundant event, which the
+        // projector also no-ops on.
+        const detailedThread = yield* getLoadedThreadDetail();
+        const existing = detailedThread?.statusEntries.find(
+          (entry) => entry.key === event.payload.statusKey,
+        );
+        const unchanged =
+          event.payload.statusText === null
+            ? existing === undefined
+            : existing !== undefined && existing.text === event.payload.statusText;
+        if (!unchanged) {
+          yield* orchestrationEngine.dispatch({
+            type: "thread.status.set",
+            commandId: yield* providerCommandId(event, "thread-status-set"),
+            threadId: thread.id,
+            statusKey: event.payload.statusKey,
+            statusText: event.payload.statusText,
+            createdAt: now,
+          });
+        }
       }
 
       if (event.type === "runtime.error") {

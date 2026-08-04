@@ -29,6 +29,7 @@ import {
   ProjectionThreadProposedPlanRepository,
 } from "../../persistence/Services/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepository } from "../../persistence/Services/ProjectionThreadSessions.ts";
+import { ProjectionThreadStatusEntryRepository } from "../../persistence/Services/ProjectionThreadStatusEntries.ts";
 import {
   type ProjectionTurn,
   ProjectionTurnRepository,
@@ -38,6 +39,7 @@ import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layer
 import { ProjectionProjectRepositoryLive } from "../../persistence/Layers/ProjectionProjects.ts";
 import { ProjectionStateRepositoryLive } from "../../persistence/Layers/ProjectionState.ts";
 import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers/ProjectionThreadActivities.ts";
+import { ProjectionThreadStatusEntryRepositoryLive } from "../../persistence/Layers/ProjectionThreadStatusEntries.ts";
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
@@ -61,6 +63,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   threadMessages: "projection.thread-messages",
   threadProposedPlans: "projection.thread-proposed-plans",
   threadActivities: "projection.thread-activities",
+  threadStatusEntries: "projection.thread-status-entries",
   threadSessions: "projection.thread-sessions",
   threadTurns: "projection.thread-turns",
   checkpoints: "projection.checkpoints",
@@ -477,6 +480,7 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
     const projectionThreadMessageRepository = yield* ProjectionThreadMessageRepository;
     const projectionThreadProposedPlanRepository = yield* ProjectionThreadProposedPlanRepository;
     const projectionThreadActivityRepository = yield* ProjectionThreadActivityRepository;
+    const projectionThreadStatusEntryRepository = yield* ProjectionThreadStatusEntryRepository;
     const projectionThreadSessionRepository = yield* ProjectionThreadSessionRepository;
     const projectionTurnRepository = yield* ProjectionTurnRepository;
     const projectionPendingApprovalRepository = yield* ProjectionPendingApprovalRepository;
@@ -1067,6 +1071,83 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
       }
     });
 
+    const MAX_THREAD_STATUS_ENTRIES = 20;
+
+    const applyThreadStatusEntriesProjection: ProjectorDefinition["apply"] = Effect.fn(
+      "applyThreadStatusEntriesProjection",
+    )(function* (event, _attachmentSideEffects) {
+      switch (event.type) {
+        case "thread.status.updated": {
+          const payload = event.payload;
+          const existingRows = yield* projectionThreadStatusEntryRepository.listByThreadId({
+            threadId: payload.threadId,
+          });
+          if (payload.statusText === null) {
+            const existing = existingRows.find((row) => row.statusKey === payload.statusKey);
+            if (existing === undefined) {
+              return;
+            }
+            yield* projectionThreadStatusEntryRepository.delete({
+              threadId: payload.threadId,
+              statusKey: payload.statusKey,
+            });
+            return;
+          }
+
+          const existing = existingRows.find((row) => row.statusKey === payload.statusKey);
+          if (existing !== undefined && existing.statusText === payload.statusText) {
+            // No-op skip: identical key+text — no churn (the ingestion normally
+            // prevents this; the projector is the backstop for races).
+            return;
+          }
+
+          yield* projectionThreadStatusEntryRepository.upsert({
+            threadId: payload.threadId,
+            statusKey: payload.statusKey,
+            statusText: payload.statusText,
+            updatedAt: payload.updatedAt,
+          });
+
+          // Cap at 20 keys, evicting the oldest by updatedAt.
+          if (existingRows.length >= MAX_THREAD_STATUS_ENTRIES) {
+            const rowsAfterUpsert = yield* projectionThreadStatusEntryRepository.listByThreadId({
+              threadId: payload.threadId,
+            });
+            const evictable = rowsAfterUpsert
+              .toSorted((left, right) => left.updatedAt.localeCompare(right.updatedAt))
+              .slice(0, rowsAfterUpsert.length - MAX_THREAD_STATUS_ENTRIES);
+            yield* Effect.forEach(
+              evictable,
+              (row) =>
+                projectionThreadStatusEntryRepository.delete({
+                  threadId: row.threadId,
+                  statusKey: row.statusKey,
+                }),
+              { concurrency: 1 },
+            ).pipe(Effect.asVoid);
+          }
+          return;
+        }
+
+        case "thread.status.cleared": {
+          const payload = event.payload;
+          const existingRows = yield* projectionThreadStatusEntryRepository.listByThreadId({
+            threadId: payload.threadId,
+          });
+          if (existingRows.length === 0) {
+            return;
+          }
+          yield* projectionThreadStatusEntryRepository.deleteByThreadId({
+            threadId: payload.threadId,
+          });
+          return;
+        }
+
+        default:
+          return;
+      }
+    });
+
     const applyThreadSessionsProjection: ProjectorDefinition["apply"] = Effect.fn(
       "applyThreadSessionsProjection",
     )(function* (event, _attachmentSideEffects) {
@@ -1564,6 +1645,10 @@ const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationProjecti
         apply: applyThreadActivitiesProjection,
       },
       {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadStatusEntries,
+        apply: applyThreadStatusEntriesProjection,
+      },
+      {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadSessions,
         apply: applyThreadSessionsProjection,
       },
@@ -1682,6 +1767,7 @@ export const OrchestrationProjectionPipelineLive = Layer.effect(
   Layer.provideMerge(ProjectionThreadMessageRepositoryLive),
   Layer.provideMerge(ProjectionThreadProposedPlanRepositoryLive),
   Layer.provideMerge(ProjectionThreadActivityRepositoryLive),
+  Layer.provideMerge(ProjectionThreadStatusEntryRepositoryLive),
   Layer.provideMerge(ProjectionThreadSessionRepositoryLive),
   Layer.provideMerge(ProjectionTurnRepositoryLive),
   Layer.provideMerge(ProjectionPendingApprovalRepositoryLive),

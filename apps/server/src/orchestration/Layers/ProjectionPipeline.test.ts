@@ -237,6 +237,118 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
       assert.deepEqual(unsettledRows, [{ settledOverride: "active", settledAt: null }]);
     }),
   );
+
+  it.effect("projects status entries with upsert, cap, and clear semantics", () =>
+    Effect.gen(function* () {
+      const projectionPipeline = yield* OrchestrationProjectionPipeline;
+      const eventStore = yield* OrchestrationEventStore;
+      const sql = yield* SqlClient.SqlClient;
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const threadId = ThreadId.make("thread-status");
+
+      const statusEvent = (
+        index: number,
+        statusKey: string,
+        statusText: string | null,
+        updatedAt: string,
+      ) => ({
+        type: "thread.status.updated" as const,
+        eventId: EventId.make(`evt-status-${index}`),
+        aggregateKind: "thread" as const,
+        aggregateId: threadId,
+        occurredAt: updatedAt,
+        commandId: CommandId.make(`cmd-status-${index}`),
+        causationEventId: null,
+        correlationId: CorrelationId.make(`cmd-status-${index}`),
+        metadata: {},
+        payload: { threadId, statusKey, statusText, updatedAt },
+      });
+
+      // Upsert 25 keys — the projection must cap at the 20 most recent.
+      for (let index = 1; index <= 25; index += 1) {
+        yield* appendAndProject(
+          statusEvent(
+            index,
+            `key-${index}`,
+            `text-${index}`,
+            `2026-03-01T00:00:${String(index).padStart(2, "0")}.000Z`,
+          ),
+        );
+      }
+
+      const rows = yield* sql<{
+        readonly statusKey: string;
+        readonly statusText: string;
+        readonly updatedAt: string;
+      }>`
+        SELECT
+          status_key AS "statusKey",
+          status_text AS "statusText",
+          updated_at AS "updatedAt"
+        FROM projection_thread_status_entries
+        WHERE thread_id = ${threadId}
+        ORDER BY updated_at ASC
+      `;
+      assert.equal(rows.length, 20);
+      // The five oldest (key-1..key-5) were evicted.
+      assert.equal(rows[0]?.statusKey, "key-6");
+      assert.equal(rows[19]?.statusKey, "key-25");
+
+      // Updating an existing key replaces its text in place (still 20 rows).
+      yield* appendAndProject(
+        statusEvent(26, "key-20", "updated-text", "2026-03-01T00:00:26.000Z"),
+      );
+      const afterUpsert = yield* sql<{
+        readonly statusKey: string;
+        readonly statusText: string;
+      }>`
+        SELECT status_key AS "statusKey", status_text AS "statusText"
+        FROM projection_thread_status_entries
+        WHERE thread_id = ${threadId}
+      `;
+      assert.equal(afterUpsert.length, 20);
+      assert.equal(
+        afterUpsert.find((row) => row.statusKey === "key-20")?.statusText,
+        "updated-text",
+      );
+
+      // Explicit null removes the key.
+      yield* appendAndProject(statusEvent(27, "key-20", null, "2026-03-01T00:00:27.000Z"));
+      const afterRemove = yield* sql<{ readonly statusKey: string }>`
+        SELECT status_key AS "statusKey"
+        FROM projection_thread_status_entries
+        WHERE thread_id = ${threadId}
+      `;
+      assert.equal(afterRemove.length, 19);
+      assert.equal(
+        afterRemove.some((row) => row.statusKey === "key-20"),
+        false,
+      );
+
+      // thread.status.cleared empties the table.
+      yield* appendAndProject({
+        type: "thread.status.cleared",
+        eventId: EventId.make("evt-status-cleared"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: "2026-03-01T00:00:28.000Z",
+        commandId: CommandId.make("cmd-status-cleared"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-status-cleared"),
+        metadata: {},
+        payload: { threadId, updatedAt: "2026-03-01T00:00:28.000Z" },
+      });
+      const afterClear = yield* sql<{ readonly statusKey: string }>`
+        SELECT status_key AS "statusKey"
+        FROM projection_thread_status_entries
+        WHERE thread_id = ${threadId}
+      `;
+      assert.equal(afterClear.length, 0);
+    }),
+  );
 });
 
 it.layer(Layer.fresh(makeProjectionPipelinePrefixedTestLayer("t3-base-")))(

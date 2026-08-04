@@ -82,6 +82,10 @@ export const ServerProviderSlashCommand = Schema.Struct({
   name: TrimmedNonEmptyString,
   description: Schema.optional(TrimmedNonEmptyString),
   input: Schema.optional(ServerProviderSlashCommandInput),
+  /** Optional source grouping, e.g. pi's Extension / Prompt / Skill. When
+   *  no item in a provider's list carries a group, clients render the flat
+   *  "Provider" section — so Claude and Codex are pixel-identical. */
+  group: Schema.optional(TrimmedNonEmptyString),
 });
 export type ServerProviderSlashCommand = typeof ServerProviderSlashCommand.Type;
 

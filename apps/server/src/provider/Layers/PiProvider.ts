@@ -2,10 +2,13 @@ import {
   type ModelCapabilities,
   type PiSettings,
   type ServerProviderModel,
+  type ServerProviderSlashCommand,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
@@ -13,6 +16,7 @@ import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildSelectOptionDescriptor,
   buildServerProvider,
+  collectStreamAsString,
   isCommandMissingCause,
   parseGenericCliVersion,
   providerModelsFromSettings,
@@ -103,8 +107,7 @@ const PI_THINKING_LEVELS: ReadonlyArray<{ value: string; label: string }> = [
  * select descriptor (the model's available tiers are per-model and only
  * visible through a live session, so the probe offers pi's universal set
  * and pi clamps per model).
- */
-export function flattenPiModels(
+ */ export function flattenPiModels(
   rows: ReadonlyArray<PiModelTableRow>,
 ): ReadonlyArray<ServerProviderModel> {
   return rows
@@ -193,12 +196,143 @@ function formatPiProbeFailure(input: {
   };
 }
 
+/** One row of the pi `get_commands` response that the probe cares about.
+ *  The response shape is version-mobile (`sourceInfo` in 0.83.0 vs
+ *  `location`/`path` in older docs) — parse only the stable fields. */
+export interface PiCommandRow {
+  readonly name: string;
+  readonly description: string | undefined;
+  readonly source: "extension" | "prompt" | "skill";
+}
+
+const PI_COMMAND_SOURCE_GROUPS: ReadonlyArray<{
+  readonly source: PiCommandRow["source"];
+  readonly group: string;
+}> = [
+  { source: "extension", group: "Extension" },
+  { source: "skill", group: "Skill" },
+  { source: "prompt", group: "Prompt" },
+];
+
+// Hoisted decoder for the probe's stdout lines (the parser selects the
+// get_commands response among pi's boot noise).
+const parseJsonLine = Schema.decodeUnknownSync(Schema.UnknownFromJsonString);
+
+function parsePiCommandRow(record: Record<string, unknown>): PiCommandRow | undefined {
+  const name = typeof record.name === "string" ? record.name.trim() : undefined;
+  if (!name || name.length === 0) {
+    return undefined;
+  }
+  const description = typeof record.description === "string" ? record.description : undefined;
+  let source: PiCommandRow["source"];
+  switch (record.source) {
+    case "extension":
+      source = "extension";
+      break;
+    case "skill":
+      source = "skill";
+      break;
+    // pi renamed "template" to "prompt" across releases — tolerate both.
+    case "prompt":
+    case "template":
+      source = "prompt";
+      break;
+    default:
+      return undefined;
+  }
+  return { name, description, source };
+}
+
+/**
+ * Parse the `get_commands` RPC response from pi's stdout. The probe
+ * subprocess emits `extension_ui_request` boot noise BEFORE the response,
+ * so only the line whose record is a `get_commands` response is selected.
+ * Malformed lines are skipped defensively.
+ */
+export function parsePiCommands(stdout: string): ReadonlyArray<PiCommandRow> {
+  const rows: Array<PiCommandRow> = [];
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let record: unknown;
+    try {
+      record = parseJsonLine(trimmed);
+    } catch {
+      continue;
+    }
+    if (typeof record !== "object" || record === null || Array.isArray(record)) {
+      continue;
+    }
+    const parsed = record as Record<string, unknown>;
+    if (parsed.type !== "response" || parsed.command !== "get_commands") {
+      continue;
+    }
+    const data = parsed.data;
+    if (!Array.isArray(data)) {
+      continue;
+    }
+    for (const entry of data) {
+      if (typeof entry !== "object" || entry === null) {
+        continue;
+      }
+      const row = parsePiCommandRow(entry as Record<string, unknown>);
+      if (row) {
+        rows.push(row);
+      }
+    }
+  }
+  return rows;
+}
+
+/**
+ * Flatten get_commands rows into `ServerProviderSlashCommand`s, ordered by
+ * pi's execution precedence (extension → skill → prompt) and deduped by
+ * lowercase name keeping the first occurrence (mirrors `dedupeSlashCommands`
+ * on the Claude side). Names are invocation-ready (`skill:` prefix kept);
+ * `input.hint` is left unset — pi 0.83.0's response carries no argument
+ * hint (map a future `argumentHint` to `input.hint`).
+ */
+export function flattenPiCommands(
+  rows: ReadonlyArray<PiCommandRow>,
+): ReadonlyArray<ServerProviderSlashCommand> {
+  const groupBySource = new Map<PiCommandRow["source"], string>(
+    PI_COMMAND_SOURCE_GROUPS.map(({ source, group }) => [source, group]),
+  );
+  const seen = new Set<string>();
+  const commands: Array<ServerProviderSlashCommand> = [];
+  for (const source of PI_COMMAND_SOURCE_GROUPS.map(({ source }) => source)) {
+    for (const row of rows) {
+      if (row.source !== source) {
+        continue;
+      }
+      const key = row.name.toLowerCase();
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      commands.push({
+        name: row.name,
+        ...(row.description !== undefined && row.description.length > 0
+          ? { description: row.description }
+          : {}),
+        group: groupBySource.get(source),
+      });
+    }
+  }
+  return commands;
+}
 /**
  * Snapshot probe for a Pi instance — OpenCode-shaped:
  *   1. `pi --version` gated on `MINIMUM_PI_VERSION` (the only gate; no
  *      runtime feature probes — see wayfinder #51).
  *   2. `pi --list-models` inventory; the table is already auth-filtered by
  *      pi, so a 0-model table is the honest "no connected upstream" signal.
+ *   3. `pi --mode rpc --no-session` + one `get_commands` line — the command
+ *      inventory for the composer menu. Enrichment only: a failed or empty
+ *      probe degrades to an empty list, never a failed provider. Same cwd
+ *      and snapshot cadence as the models probe (wayfinder #54).
  *
  * Missing binary → `installed: false`. No extra TTL beyond the managed
  * snapshot cadence (pi reloads `models.json` per `/model` open).
@@ -255,6 +389,32 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       }),
     );
 
+  // The get_commands probe pipes one JSON line into stdin (closed on done
+  // — pi answers then exits on EOF) and collects stdout. Fixed args only,
+  // never user launchArgs (consistent with the models probe).
+  const runGetCommandsProbe = () =>
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const child = yield* spawner.spawn(
+        ChildProcess.make(piSettings.binaryPath, ["--mode", "rpc", "--no-session"], {
+          cwd,
+          env: resolvedEnvironment,
+          extendEnv: false,
+          stdin: {
+            // One fixed get_commands line; closing stdin (endOnDone) makes
+            // pi answer and exit — the empirical probe pipes exactly this.
+            stream: Stream.encodeText(Stream.make(`{"type":"get_commands"}\n`)),
+            endOnDone: true,
+          },
+        }),
+      );
+      const [stdout] = yield* Effect.all(
+        [collectStreamAsString(child.stdout), child.exitCode.pipe(Effect.map(Number))],
+        { concurrency: "unbounded" },
+      );
+      return stdout;
+    }).pipe(Effect.scoped);
+
   const versionExit = yield* Effect.exit(runPi(["--version"]));
   if (versionExit._tag === "Failure") {
     return fallback(Cause.squash(versionExit.cause));
@@ -296,11 +456,19 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     DEFAULT_PI_MODEL_CAPABILITIES,
   );
   const availableCount = models.filter((model) => !model.isCustom).length;
+
+  // Command inventory: enrichment. Any failure or timeout degrades to an
+  // empty list — the snapshot stays "ready" from the models probe above.
+  const commandsExit = yield* Effect.exit(runGetCommandsProbe());
+  const slashCommands =
+    commandsExit._tag === "Success" ? flattenPiCommands(parsePiCommands(commandsExit.value)) : [];
+
   return buildServerProvider({
     presentation: PI_PRESENTATION,
     enabled: true,
     checkedAt,
     models,
+    slashCommands,
     probe: {
       installed: true,
       version,

@@ -209,6 +209,7 @@ describe("environment entity projections", () => {
       messages,
       proposedPlans: [],
       activities: [],
+      statusEntries: [],
       checkpoints: [],
     } satisfies OrchestrationThread & { readonly environmentId: EnvironmentId };
     const shell = {
@@ -324,6 +325,7 @@ describe("environment entity projections", () => {
       messages: [],
       proposedPlans: [],
       activities: [],
+      statusEntries: [],
       checkpoints: [],
     } satisfies OrchestrationThread;
 

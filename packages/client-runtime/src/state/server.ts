@@ -725,6 +725,18 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    piGetSettingsFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pi-get-settings-file",
+      tag: WS_METHODS.serverPiGetSettingsFile,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    piUpdateSettingsFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:pi-update-settings-file",
+      tag: WS_METHODS.serverPiUpdateSettingsFile,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,

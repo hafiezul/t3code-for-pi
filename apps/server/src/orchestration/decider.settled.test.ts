@@ -47,6 +47,7 @@ function makeReadModel(
         deletedAt: null,
         messages,
         proposedPlans: [],
+        statusEntries: [],
         activities,
         checkpoints: [],
         session,
@@ -518,4 +519,91 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
       expect(routineEvents.map((event) => event.type)).toEqual(["thread.activity-appended"]);
     }),
   );
+
+  it("decides thread.status.updated for a set and a clear", () =>
+    Effect.gen(function* () {
+      const setResult = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.status.set",
+          commandId: CommandId.make("cmd-status-set"),
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null),
+      });
+      const setEvents = Array.isArray(setResult) ? setResult : [setResult];
+      expect(setEvents).toHaveLength(1);
+      expect(setEvents[0]?.type).toBe("thread.status.updated");
+      if (setEvents[0]?.type === "thread.status.updated") {
+        expect(setEvents[0].payload).toEqual({
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+          updatedAt: NOW,
+        });
+      }
+
+      const clearResult = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.status.set",
+          commandId: CommandId.make("cmd-status-clear"),
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: null,
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null),
+      });
+      const clearEvents = Array.isArray(clearResult) ? clearResult : [clearResult];
+      expect(clearEvents[0]?.type).toBe("thread.status.updated");
+      if (clearEvents[0]?.type === "thread.status.updated") {
+        expect(clearEvents[0].payload.statusText).toBeNull();
+      }
+    }));
+
+  it("decides thread.status.cleared for the clear-all command", () =>
+    Effect.gen(function* () {
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.status.clear",
+          commandId: CommandId.make("cmd-status-clear-all"),
+          threadId: ThreadId.make("thread-1"),
+          createdAt: NOW,
+        },
+        readModel: makeReadModel(null),
+      });
+      const events = Array.isArray(result) ? result : [result];
+      expect(events).toHaveLength(1);
+      expect(events[0]?.type).toBe("thread.status.cleared");
+      if (events[0]?.type === "thread.status.cleared") {
+        expect(events[0].payload).toEqual({
+          threadId: ThreadId.make("thread-1"),
+          updatedAt: NOW,
+        });
+      }
+    }));
+
+  it("rejects status commands for missing threads", () =>
+    Effect.gen(function* () {
+      const emptyModel: OrchestrationReadModel = {
+        snapshotSequence: 0,
+        projects: [],
+        threads: [],
+        updatedAt: NOW,
+      };
+      const result = yield* decideOrchestrationCommand({
+        command: {
+          type: "thread.status.set",
+          commandId: CommandId.make("cmd-status-missing"),
+          threadId: ThreadId.make("no-such-thread"),
+          statusKey: "my-ext",
+          statusText: "busy",
+          createdAt: NOW,
+        },
+        readModel: emptyModel,
+      }).pipe(Effect.exit);
+      expect(result._tag).toBe("Failure");
+    }));
 });

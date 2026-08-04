@@ -324,6 +324,15 @@ export const OrchestrationThreadActivity = Schema.Struct({
 });
 export type OrchestrationThreadActivity = typeof OrchestrationThreadActivity.Type;
 
+/** One extension status entry on a thread (pi setStatus). Text is always
+ *  non-null in the projection — a null statusText removes the entry. */
+export const ThreadStatusEntry = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString,
+  updatedAt: IsoDateTime,
+});
+export type ThreadStatusEntry = typeof ThreadStatusEntry.Type;
+
 const OrchestrationLatestTurnState = Schema.Literals([
   "running",
   "interrupted",
@@ -382,6 +391,11 @@ export const OrchestrationThread = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   activities: Schema.Array(OrchestrationThreadActivity),
+  // Extension status entries (pi setStatus): keyed, ordered by updatedAt.
+  // Decoding default keeps snapshots from older servers compatible.
+  statusEntries: Schema.Array(ThreadStatusEntry).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   checkpoints: Schema.Array(OrchestrationCheckpointSummary),
   session: Schema.NullOr(OrchestrationSession),
 });
@@ -869,6 +883,23 @@ const ThreadActivityAppendCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
+const ThreadStatusSetCommand = Schema.Struct({
+  type: Schema.Literal("thread.status.set"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  statusKey: TrimmedNonEmptyString,
+  /** Explicit null clears the entry for this key. */
+  statusText: Schema.NullOr(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+
+const ThreadStatusClearCommand = Schema.Struct({
+  type: Schema.Literal("thread.status.clear"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const ThreadRevertCompleteCommand = Schema.Struct({
   type: Schema.Literal("thread.revert.complete"),
   commandId: CommandId,
@@ -892,6 +923,8 @@ const InternalOrchestrationCommand = Schema.Union([
   ThreadProposedPlanUpsertCommand,
   ThreadTurnDiffCompleteCommand,
   ThreadActivityAppendCommand,
+  ThreadStatusSetCommand,
+  ThreadStatusClearCommand,
   ThreadRevertCompleteCommand,
   ThreadTitleRegenerationCompleteCommand,
 ]);
@@ -930,6 +963,8 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.proposed-plan-upserted",
   "thread.turn-diff-completed",
   "thread.activity-appended",
+  "thread.status.updated",
+  "thread.status.cleared",
 ]);
 export type OrchestrationEventType = typeof OrchestrationEventType.Type;
 
@@ -1140,6 +1175,19 @@ export const ThreadActivityAppendedPayload = Schema.Struct({
   activity: OrchestrationThreadActivity,
 });
 
+export const ThreadStatusUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  statusKey: TrimmedNonEmptyString,
+  /** Explicit null = the entry for this key was removed. */
+  statusText: Schema.NullOr(TrimmedNonEmptyString),
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadStatusClearedPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
+});
+
 export const OrchestrationEventMetadata = Schema.Struct({
   providerTurnId: Schema.optional(TrimmedNonEmptyString),
   providerItemId: Schema.optional(ProviderItemId),
@@ -1291,6 +1339,16 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.activity-appended"),
     payload: ThreadActivityAppendedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.status.updated"),
+    payload: ThreadStatusUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.status.cleared"),
+    payload: ThreadStatusClearedPayload,
   }),
 ]);
 export type OrchestrationEvent = typeof OrchestrationEvent.Type;

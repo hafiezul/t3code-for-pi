@@ -52,6 +52,7 @@ function makeThread(overrides: Partial<Thread> = {}): Thread {
     messages: [],
     proposedPlans: [],
     activities: [],
+    statusEntries: [],
     checkpoints: [],
     createdAt: now,
     updatedAt: now,
@@ -126,6 +127,7 @@ describe("buildLoadingThreadFromShell", () => {
       messages: [],
       proposedPlans: [],
       activities: [],
+      statusEntries: [],
       checkpoints: [],
     });
   });

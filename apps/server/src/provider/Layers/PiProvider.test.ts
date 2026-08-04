@@ -9,8 +9,10 @@ import { PiSettings } from "@t3tools/contracts";
 
 import {
   checkPiProviderStatus,
+  flattenPiCommands,
   flattenPiModels,
   MINIMUM_PI_VERSION,
+  parsePiCommands,
   parsePiModelTable,
 } from "./PiProvider.ts";
 
@@ -112,6 +114,70 @@ describe("parsePiModelTable", () => {
   });
 });
 
+describe("parsePiCommands", () => {
+  const rpcBootNoise = [
+    '{"type":"extension_ui_request","id":"n1","method":"setStatus","statusKey":"boot","statusText":"starting"}',
+    '{"type":"extension_ui_request","id":"n2","method":"notify","message":"loaded"}',
+  ].join("\n");
+
+  const commandLine = JSON.stringify({
+    type: "response",
+    id: "c1",
+    command: "get_commands",
+    success: true,
+    data: [
+      { name: "/fix", description: "Fix lint errors", source: "extension" },
+      { name: "summarize", description: "Summarize the branch", source: "prompt" },
+      { name: "skill:plan", description: "Run the plan skill", source: "skill" },
+      { name: "legacy", description: "Old template", source: "template" },
+      { name: "nodesc", source: "extension" },
+      { name: "bogus", source: "unknown-source" },
+      "not-an-object",
+    ],
+  });
+
+  it("selects the get_commands response among boot noise and maps sources", () => {
+    const rows = parsePiCommands(`${rpcBootNoise}\n${commandLine}\nnot json\n`);
+    expect(rows).toEqual([
+      { name: "/fix", description: "Fix lint errors", source: "extension" },
+      { name: "summarize", description: "Summarize the branch", source: "prompt" },
+      { name: "skill:plan", description: "Run the plan skill", source: "skill" },
+      // "template" is pi's pre-rename source value for prompt templates.
+      { name: "legacy", description: "Old template", source: "prompt" },
+      { name: "nodesc", description: undefined, source: "extension" },
+    ]);
+  });
+
+  it("returns an empty list when no get_commands response is present", () => {
+    expect(parsePiCommands(rpcBootNoise)).toEqual([]);
+  });
+});
+
+describe("flattenPiCommands", () => {
+  it("orders by pi execution precedence, dedupes by lowercase name, and groups", () => {
+    const commands = flattenPiCommands([
+      { name: "alpha", description: "prompt copy", source: "prompt" },
+      { name: "Alpha", description: "extension copy", source: "extension" },
+      { name: "skill:alpha", description: "skill copy", source: "skill" },
+      { name: "beta", description: "extension", source: "extension" },
+    ]);
+
+    expect(commands).toEqual([
+      // "alpha" (prompt) is deduped: "Alpha" (extension) already claimed
+      // the lowercase key, and extensions outrank prompts in pi's
+      // execution precedence.
+      { name: "Alpha", description: "extension copy", group: "Extension" },
+      { name: "beta", description: "extension", group: "Extension" },
+      { name: "skill:alpha", description: "skill copy", group: "Skill" },
+    ]);
+  });
+
+  it("omits empty descriptions", () => {
+    const commands = flattenPiCommands([{ name: "/fix", description: "", source: "extension" }]);
+    expect(commands[0]).toEqual({ name: "/fix", group: "Extension" });
+  });
+});
+
 describe("checkPiProviderStatus", () => {
   it("reports ready with probe-reported models and thinking descriptors", async () => {
     const spawner = makeScriptedSpawner({
@@ -201,5 +267,66 @@ describe("checkPiProviderStatus", () => {
     expect(snapshot.enabled).toBe(false);
     expect(snapshot.status).toBe("disabled");
     expect(spawnCount).toBe(0);
+  });
+
+  it("surfaces slash commands from the get_commands probe", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args.includes("--version")) {
+          return makeStdoutHandle("0.83.0\n");
+        }
+        if (args.includes("--list-models")) {
+          return makeStdoutHandle("provider  model  context  max-out  thinking  images\n");
+        }
+        if (args.includes("--mode") && args.includes("rpc")) {
+          return makeStdoutHandle(
+            [
+              // Boot noise arrives BEFORE the response — the parser must
+              // select the get_commands response, not the first line.
+              '{"type":"extension_ui_request","id":"n1","method":"setStatus","statusKey":"boot","statusText":"starting"}',
+              JSON.stringify({
+                type: "response",
+                id: "c1",
+                command: "get_commands",
+                success: true,
+                data: [
+                  { name: "/fix", description: "Fix lint errors", source: "extension" },
+                  { name: "skill:plan", description: "Plan skill", source: "skill" },
+                  { name: "summarize", description: "Branch summary", source: "prompt" },
+                ],
+              }),
+            ].join("\n") + "\n",
+          );
+        }
+        throw new Error(`unexpected args: ${args.join(" ")}`);
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.slashCommands).toEqual([
+      { name: "/fix", description: "Fix lint errors", group: "Extension" },
+      { name: "skill:plan", description: "Plan skill", group: "Skill" },
+      { name: "summarize", description: "Branch summary", group: "Prompt" },
+    ]);
+  });
+
+  it("degrades to an empty command list when the get_commands probe fails", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args.includes("--version")) {
+          return makeStdoutHandle("0.83.0\n");
+        }
+        if (args.includes("--list-models")) {
+          return makeStdoutHandle("provider  model  context  max-out  thinking  images\n");
+        }
+        // The get_commands probe dies (e.g. pi crashed) — the snapshot must
+        // stay ready with an empty command list, never a failed provider.
+        throw new Error("simulated get_commands probe crash");
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.status).toBe("warning"); // zero-model table from the fixture above
+    expect(snapshot.slashCommands).toEqual([]);
   });
 });

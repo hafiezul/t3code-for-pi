@@ -41,6 +41,7 @@ const baseThread: OrchestrationThread = {
   messages: [],
   proposedPlans: [],
   activities: [],
+  statusEntries: [],
   checkpoints: [],
   session: null,
 };
@@ -742,6 +743,144 @@ describe("applyThreadDetailEvent", () => {
         expect(result.thread.messages).toHaveLength(2);
         expect(result.thread.latestTurn?.turnId).toBe("turn-1");
       }
+    });
+  });
+
+  describe("thread.status.updated", () => {
+    it("upserts a status entry by key", () => {
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 20,
+        occurredAt: "2026-04-01T14:00:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+          updatedAt: "2026-04-01T14:00:00.000Z",
+        },
+      });
+
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.statusEntries).toEqual([
+          {
+            key: "my-ext",
+            text: "Turn 3 running...",
+            updatedAt: "2026-04-01T14:00:00.000Z",
+          },
+        ]);
+      }
+    });
+
+    it("replaces the text for an existing key and no-ops identical repeats", () => {
+      const seeded: OrchestrationThread = {
+        ...baseThread,
+        statusEntries: [
+          { key: "my-ext", text: "Turn 3 running...", updatedAt: "2026-04-01T14:00:00.000Z" },
+        ],
+      };
+      const identical = applyThreadDetailEvent(seeded, {
+        ...baseEventFields,
+        sequence: 21,
+        occurredAt: "2026-04-01T14:01:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+          updatedAt: "2026-04-01T14:01:00.000Z",
+        },
+      });
+      expect(identical.kind).toBe("unchanged");
+
+      const changed = applyThreadDetailEvent(seeded, {
+        ...baseEventFields,
+        sequence: 22,
+        occurredAt: "2026-04-01T14:02:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: "Done",
+          updatedAt: "2026-04-01T14:02:00.000Z",
+        },
+      });
+      expect(changed.kind).toBe("updated");
+      if (changed.kind === "updated") {
+        expect(changed.thread.statusEntries).toEqual([
+          { key: "my-ext", text: "Done", updatedAt: "2026-04-01T14:02:00.000Z" },
+        ]);
+      }
+    });
+
+    it("removes the entry on an explicit null text", () => {
+      const seeded: OrchestrationThread = {
+        ...baseThread,
+        statusEntries: [{ key: "my-ext", text: "Done", updatedAt: "2026-04-01T14:02:00.000Z" }],
+      };
+      const result = applyThreadDetailEvent(seeded, {
+        ...baseEventFields,
+        sequence: 23,
+        occurredAt: "2026-04-01T14:03:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.updated",
+        payload: {
+          threadId: ThreadId.make("thread-1"),
+          statusKey: "my-ext",
+          statusText: null,
+          updatedAt: "2026-04-01T14:03:00.000Z",
+        },
+      });
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.statusEntries).toEqual([]);
+      }
+    });
+  });
+
+  describe("thread.status.cleared", () => {
+    it("clears every status entry", () => {
+      const seeded: OrchestrationThread = {
+        ...baseThread,
+        statusEntries: [
+          { key: "ext-a", text: "busy", updatedAt: "2026-04-01T14:00:00.000Z" },
+          { key: "ext-b", text: "working", updatedAt: "2026-04-01T14:01:00.000Z" },
+        ],
+      };
+      const result = applyThreadDetailEvent(seeded, {
+        ...baseEventFields,
+        sequence: 24,
+        occurredAt: "2026-04-01T14:04:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.cleared",
+        payload: { threadId: ThreadId.make("thread-1"), updatedAt: "2026-04-01T14:04:00.000Z" },
+      });
+      expect(result.kind).toBe("updated");
+      if (result.kind === "updated") {
+        expect(result.thread.statusEntries).toEqual([]);
+      }
+    });
+
+    it("is a no-op when there are no entries", () => {
+      const result = applyThreadDetailEvent(baseThread, {
+        ...baseEventFields,
+        sequence: 25,
+        occurredAt: "2026-04-01T14:05:00.000Z",
+        aggregateKind: "thread",
+        aggregateId: ThreadId.make("thread-1"),
+        type: "thread.status.cleared",
+        payload: { threadId: ThreadId.make("thread-1"), updatedAt: "2026-04-01T14:05:00.000Z" },
+      });
+      expect(result.kind).toBe("unchanged");
     });
   });
 

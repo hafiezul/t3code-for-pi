@@ -105,6 +105,96 @@ describe("ProviderRuntimeEvent", () => {
     }
     expect(parsed.payload.questions[0]?.id).toBe("sandbox_mode");
     expect(parsed.payload.questions[0]?.options).toHaveLength(2);
+    // Options-only questions default to the options answer kind — existing
+    // emitters are untouched by the text-kind contract extension (#57).
+    expect(parsed.payload.questions[0]?.answerKind).toBe("options");
+  });
+
+  it("decodes text-kind user-input questions with placeholder and prefill", () => {
+    const parsed = decodeRuntimeEvent({
+      type: "user-input.requested",
+      eventId: "event-text-input",
+      provider: "pi",
+      createdAt: "2026-02-28T00:00:01.000Z",
+      threadId: "thread-2",
+      requestId: "request-text",
+      payload: {
+        questions: [
+          {
+            id: "request-text",
+            header: "Pi extension",
+            question: "Enter a value",
+            options: [],
+            answerKind: "text",
+            placeholder: "type something...",
+          },
+          {
+            id: "request-editor",
+            header: "Pi extension",
+            question: "Edit some text",
+            options: [],
+            answerKind: "editor",
+            initialValue: "Line 1\nLine 2",
+          },
+        ],
+      },
+    });
+
+    expect(parsed.type).toBe("user-input.requested");
+    if (parsed.type !== "user-input.requested") {
+      throw new Error("expected user-input.requested");
+    }
+    expect(parsed.payload.questions[0]?.answerKind).toBe("text");
+    expect(parsed.payload.questions[0]?.placeholder).toBe("type something...");
+    expect(parsed.payload.questions[1]?.answerKind).toBe("editor");
+    expect(parsed.payload.questions[1]?.initialValue).toBe("Line 1\nLine 2");
+  });
+
+  it("decodes extension.notice and extension.status events", () => {
+    const notice = decodeRuntimeEvent({
+      type: "extension.notice",
+      eventId: "event-notice",
+      provider: "pi",
+      createdAt: "2026-02-28T00:00:02.000Z",
+      threadId: "thread-2",
+      payload: { message: "Command blocked by user", noticeType: "warning" },
+    });
+    expect(notice.type).toBe("extension.notice");
+    if (notice.type !== "extension.notice") {
+      throw new Error("expected extension.notice");
+    }
+    expect(notice.payload.message).toBe("Command blocked by user");
+    expect(notice.payload.noticeType).toBe("warning");
+
+    const status = decodeRuntimeEvent({
+      type: "extension.status",
+      eventId: "event-status",
+      provider: "pi",
+      createdAt: "2026-02-28T00:00:03.000Z",
+      threadId: "thread-2",
+      payload: { statusKey: "my-ext", statusText: "Turn 3 running..." },
+    });
+    expect(status.type).toBe("extension.status");
+    if (status.type !== "extension.status") {
+      throw new Error("expected extension.status");
+    }
+    expect(status.payload.statusKey).toBe("my-ext");
+    expect(status.payload.statusText).toBe("Turn 3 running...");
+
+    // Explicit null = clear; the adapter normalizes pi's omitted statusText.
+    const cleared = decodeRuntimeEvent({
+      type: "extension.status",
+      eventId: "event-status-clear",
+      provider: "pi",
+      createdAt: "2026-02-28T00:00:04.000Z",
+      threadId: "thread-2",
+      payload: { statusKey: "my-ext", statusText: null },
+    });
+    expect(cleared.type).toBe("extension.status");
+    if (cleared.type !== "extension.status") {
+      throw new Error("expected extension.status");
+    }
+    expect(cleared.payload.statusText).toBeNull();
   });
 
   it("decodes user-input.resolved with answer map", () => {

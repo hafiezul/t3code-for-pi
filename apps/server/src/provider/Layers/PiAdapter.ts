@@ -22,9 +22,10 @@
  *   - pi has no tool-permission prompts: `respondToRequest` is a documented
  *     no-op, no `request.opened`/`tool.denied` is ever emitted. Extension
  *     dialogs surface through the `extension_ui_request` sub-protocol:
- *     `select`/`confirm` map to `user-input.requested`; `input`/`editor`
- *     don't fit T3's options-only contract and are declined so extensions
- *     fall back to their defaults.
+ *     `select`/`confirm`/`input`/`editor` map to `user-input.requested`
+ *     (text kinds for the free-form dialogs, #57); `notify`/`setStatus`
+ *     become the `extension.notice`/`extension.status` runtime events
+ *     (#58); setWidget/setTitle/set_editor_text are dropped.
  *   - Thread restore rewinds by `fork` at the first user entry of the first
  *     discarded turn (#52); boundaries (session leaf ids at each
  *     `agent_settled`) are persisted in the resume cursor.
@@ -191,7 +192,7 @@ interface PiAdapterSessionContext {
   readonly sessionIdRef: Ref.Ref<string | undefined>;
   readonly turnBoundariesRef: Ref.Ref<readonly string[]>;
   readonly lastBoundaryRef: Ref.Ref<string | undefined>;
-  /** Extension dialogs awaiting a response (select/confirm). */
+  /** Extension dialogs awaiting a response (select/confirm/input/editor). */
   readonly pendingUiRequests: Map<ApprovalRequestId, PiUiRequest>;
   /** One-shot: the next `agent_settled` follows an `abort` and must not
    *  close the turn or record a boundary. */
@@ -208,7 +209,9 @@ type PiUiRequest =
       readonly id: ApprovalRequestId;
       readonly options: ReadonlyArray<string>;
     }
-  | { readonly method: "confirm"; readonly id: ApprovalRequestId };
+  | { readonly method: "confirm"; readonly id: ApprovalRequestId }
+  | { readonly method: "input"; readonly id: ApprovalRequestId }
+  | { readonly method: "editor"; readonly id: ApprovalRequestId };
 
 export interface PiAdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
@@ -817,18 +820,6 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
     }
     const requestId = ApprovalRequestId.make(id);
     const method = event.method;
-    const writeResponse = (payload: Record<string, unknown>) =>
-      context.client.send({ type: "extension_ui_response", id, ...payload }).pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "extension_ui_response",
-              detail: cause.detail,
-              cause,
-            }),
-        ),
-      );
 
     if (method === "select") {
       const options = Array.isArray(event.options)
@@ -888,14 +879,99 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
     }
 
     if (method === "input" || method === "editor") {
-      // Free-form dialogs don't fit T3's options-only user-input contract
-      // (#44): decline so the extension falls back to its default value.
-      yield* writeResponse({ cancelled: true }).pipe(Effect.ignore);
-      yield* Effect.logDebug("Declined pi extension dialog", { method, id });
+      // Free-form dialogs ride the shared user-input contract via the text
+      // answer kinds (#57): single-line input with placeholder, or prefilled
+      // multiline editor. No cancel path — interrupting the turn is the way
+      // out, exactly like select/confirm.
+      const request: Extract<PiUiRequest, { method: "input" | "editor" }> = {
+        method,
+        id: requestId,
+      };
+      context.pendingUiRequests.set(requestId, request);
+      const title =
+        typeof event.title === "string" && event.title.trim().length > 0
+          ? event.title.trim()
+          : "Pi extension request";
+      const placeholder =
+        typeof event.placeholder === "string" && event.placeholder.trim().length > 0
+          ? event.placeholder.trim()
+          : undefined;
+      const prefill =
+        typeof event.prefill === "string" && event.prefill.trim().length > 0
+          ? event.prefill.trim()
+          : undefined;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId: context.activeTurnId,
+          requestId,
+          raw: event,
+        })),
+        type: "user-input.requested",
+        payload: {
+          questions: [
+            {
+              id: requestId,
+              header: "Pi extension",
+              question: title,
+              options: [],
+              multiSelect: false,
+              answerKind: method === "input" ? "text" : "editor",
+              ...(placeholder !== undefined ? { placeholder } : {}),
+              ...(prefill !== undefined ? { initialValue: prefill } : {}),
+            },
+          ],
+        },
+      });
       return;
     }
 
-    // Fire-and-forget UI methods (notify, setStatus, setWidget, setTitle,
+    if (method === "notify") {
+      const message =
+        typeof event.message === "string" && event.message.trim().length > 0
+          ? event.message.trim()
+          : "Pi extension notification";
+      const noticeType =
+        event.notifyType === "warning" || event.notifyType === "error" ? event.notifyType : "info";
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId: context.activeTurnId,
+          raw: event,
+        })),
+        type: "extension.notice",
+        payload: { message, noticeType },
+      });
+      return;
+    }
+
+    if (method === "setStatus") {
+      const statusKey =
+        typeof event.statusKey === "string" && event.statusKey.trim().length > 0
+          ? event.statusKey.trim()
+          : undefined;
+      if (!statusKey) {
+        return;
+      }
+      // pi clears a status entry by omitting statusText — normalize to an
+      // explicit null so the event contract has no absent-field ambiguity.
+      const statusText =
+        typeof event.statusText === "string" && event.statusText.length > 0
+          ? event.statusText
+          : null;
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId: context.activeTurnId,
+          raw: event,
+        })),
+        type: "extension.status",
+        payload: { statusKey, statusText },
+      });
+      return;
+    }
+
+    // Remaining fire-and-forget UI methods (setWidget, setTitle,
     // set_editor_text): nothing to render in T3's chat — drop.
     yield* Effect.logDebug("Ignoring pi extension UI request", { method, id });
   });
@@ -1607,9 +1683,25 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
           .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
         return;
       }
-      const confirmed = selected === "Yes";
+      if (request.method === "confirm") {
+        const confirmed = selected === "Yes";
+        yield* context.client
+          .send({ type: "extension_ui_response", id: requestId, confirmed })
+          .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
+        return;
+      }
+      // input / editor: non-empty value answers only (empty = unanswered,
+      // matches the custom-answer machinery — the client blocks empty
+      // submits; this is the server-side backstop).
+      if (typeof selected !== "string" || selected.trim().length === 0) {
+        return yield* new ProviderAdapterRequestError({
+          provider: PROVIDER,
+          method: "extension_ui_response",
+          detail: "Pi text dialogs require a non-empty answer.",
+        });
+      }
       yield* context.client
-        .send({ type: "extension_ui_response", id: requestId, confirmed })
+        .send({ type: "extension_ui_response", id: requestId, value: selected })
         .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
     });
 
