@@ -819,7 +819,8 @@ describe("makePiAdapter — scripted RPC process", () => {
             case "extension_ui_response":
               return [reply(command)];
             case "abort":
-              return [reply(command), { type: "agent_settled" }];
+              // Real pi emits the settle before the abort response.
+              return [{ type: "agent_settled" }, reply(command)];
             default:
               throw new Error(`unexpected command: ${command.type}`);
           }
@@ -900,8 +901,8 @@ describe("makePiAdapter — scripted RPC process", () => {
         expect(turnEvents.filter((event) => event.type === "turn.completed")).toHaveLength(1);
 
         // Interrupt: abort is sent while a turn is active; the settle that
-        // follows the abort is suppressed — no second turn.completed, no
-        // boundary recording.
+        // follows the abort is suppressed, and the adapter itself closes the
+        // turn as interrupted — no boundary recording.
         yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
         yield* adapter.sendTurn({
           threadId,
@@ -920,14 +921,19 @@ describe("makePiAdapter — scripted RPC process", () => {
         yield* Deferred.await(aborted);
         expect((yield* nextCommand(state)).type).toBe("abort");
 
-        // Wait for the suppressed settle to be consumed, then assert nothing
-        // closed the (already aborted) turn and no boundary was recorded.
+        // The turn closes exactly once, as interrupted (never "completed"),
+        // and no boundary is recorded.
         yield* Effect.yieldNow;
         yield* TestClock.adjust("50 millis");
         yield* Effect.yieldNow;
         const abortEvents = yield* Ref.get(abortCollector.events);
         expect(abortEvents.filter((event) => event.type === "turn.aborted")).toHaveLength(1);
-        expect(abortEvents.filter((event) => event.type === "turn.completed")).toHaveLength(0);
+        const abortCompletions = abortEvents.filter((event) => event.type === "turn.completed");
+        expect(abortCompletions).toHaveLength(1);
+        expect(abortCompletions[0]!.payload).toEqual({
+          state: "interrupted",
+          errorMessage: "Interrupted by user.",
+        });
         // No boundary recording follows the aborted turn.
         expect(yield* Queue.poll(state.observed)).toEqual(Option.none());
 
@@ -935,6 +941,197 @@ describe("makePiAdapter — scripted RPC process", () => {
         yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
         yield* Fiber.interrupt(abortCollector.fiber).pipe(Effect.ignore);
       }),
+  );
+
+  it.effect(
+    "interrupts an active turn as 'interrupted' even though real pi settles before the abort response",
+    () =>
+      Effect.gen(function* () {
+        // Real pi emits `agent_settled` to stdout BEFORE the `abort` response
+        // (session.abort() = agent.abort() + waitForIdle(), and the settle
+        // fires before the idle-wait resolves). The scripted process mirrors
+        // that ordering: settle line first, response line second.
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_steering_mode":
+            case "set_follow_up_mode":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // The turn stays active: no agent_settled yet.
+              return [reply(command)];
+            case "abort":
+              return [{ type: "agent_settled" }, reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const turnEnded = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { turnEnded },
+          matches: (event) =>
+            event.type === "turn.completed" || event.type === "turn.aborted"
+              ? "turnEnded"
+              : undefined,
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/pi-project",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+        });
+        // Queue-mode pins + state sync.
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        yield* adapter.sendTurn({
+          threadId,
+          input: "do the thing",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        yield* adapter.interruptTurn(threadId);
+        expect((yield* nextCommand(state)).type).toBe("abort");
+
+        // The turn must end exactly once, as interrupted — the state the
+        // orchestration layer consumes to settle the session. The unsuppressed
+        // settle must not leak a lying "completed" turn end.
+        yield* Deferred.await(turnEnded);
+        yield* Effect.yieldNow;
+        yield* TestClock.adjust("50 millis");
+        yield* Effect.yieldNow;
+        const events = yield* Ref.get(collector.events);
+        const completions = events.filter((event) => event.type === "turn.completed");
+        expect(completions).toHaveLength(1);
+        expect(completions[0]!.payload).toMatchObject({ state: "interrupted" });
+        expect(events.filter((event) => event.type === "turn.aborted")).toHaveLength(1);
+        // No boundary recording follows the aborted turn.
+        expect(yield* Queue.poll(state.observed)).toEqual(Option.none());
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect("an interrupt on an idle session does not suppress the next turn's settle", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_steering_mode":
+          case "set_follow_up_mode":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            // A complete turn: work then settle.
+            return [reply(command), { type: "agent_settled" }];
+          case "abort":
+            return [{ type: "agent_settled" }, reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makePiAdapter(decodeSettings({}), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) =>
+          event.type === "turn.completed" || event.type === "session.exited"
+            ? "settled"
+            : undefined,
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/pi-project",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+      });
+      // Queue-mode pins + state sync.
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      // First turn completes normally.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "first",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settled);
+      // Boundary recording after the natural settle.
+      expect((yield* nextCommand(state)).type).toBe("get_entries");
+
+      // Stop on the now-idle session: must not arm the suppress flag.
+      yield* adapter.interruptTurn(threadId);
+      expect((yield* nextCommand(state)).type).toBe("abort");
+      yield* Effect.yieldNow;
+
+      // The next turn must complete normally — its settle is not suppressed.
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      const settledAgain = yield* Deferred.make<undefined>();
+      const collector2 = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settledAgain },
+        matches: (event) =>
+          event.type === "turn.completed" || event.type === "session.exited"
+            ? "settledAgain"
+            : undefined,
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "second",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledAgain);
+      const events = yield* Ref.get(collector2.events);
+      const completions = events.filter((event) => event.type === "turn.completed");
+      expect(completions).toHaveLength(1);
+      expect(completions[0]!.payload).toMatchObject({ state: "completed" });
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      yield* Fiber.interrupt(collector2.fiber).pipe(Effect.ignore);
+    }),
   );
 
   it.effect("refuses to rewind while a turn is streaming", () =>

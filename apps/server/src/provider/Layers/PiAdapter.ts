@@ -1525,6 +1525,13 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
     Effect.gen(function* () {
       const context = yield* requireSession(threadId);
       const activeTurnId = turnId ?? context.activeTurnId;
+      // pi's `abort` handler is `agent.abort() + waitForIdle()`, and pi
+      // emits `agent_settled` BEFORE the idle-wait resolves, so the settle
+      // line always precedes the abort response line. The flag must be
+      // armed up front — arming it after the response is always too late.
+      if (activeTurnId !== undefined) {
+        yield* Ref.set(context.suppressNextSettled, true);
+      }
       yield* context.client.send({ type: "abort" }).pipe(
         Effect.mapError(
           (cause) =>
@@ -1535,15 +1542,23 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
               cause,
             }),
         ),
-        // pi settles after an abort (agent_settled follows once idle), so
-        // the imminent settle must not close the turn or record a boundary.
-        Effect.tap(() =>
-          context.activeTurnId !== undefined
-            ? Ref.set(context.suppressNextSettled, true)
-            : Effect.void,
-        ),
+        // If the abort round trip fails (timeout, dead process), a settle
+        // that still arrives must be allowed to close the turn again.
+        Effect.tapError(() => Ref.set(context.suppressNextSettled, false)),
       );
       if (activeTurnId !== undefined) {
+        context.activeTurnId = undefined;
+        yield* updateSession(context, { status: "ready" }, { clearActiveTurnId: true });
+        // The only turn-end event the orchestration layer consumes is
+        // turn.completed — turn.aborted alone would leave the thread stuck
+        // in "running". `thread.turn-interrupt-requested` (with the turn id
+        // the web client always sends) already marked the turn row
+        // interrupted; this closes the session side.
+        yield* emit({
+          ...(yield* buildEventBase({ threadId, turnId: activeTurnId })),
+          type: "turn.completed",
+          payload: { state: "interrupted", errorMessage: "Interrupted by user." },
+        });
         yield* emit({
           ...(yield* buildEventBase({ threadId, turnId: activeTurnId })),
           type: "turn.aborted",
