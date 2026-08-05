@@ -1527,6 +1527,18 @@ describe("makePiAdapter — scripted RPC process", () => {
         expect(uiResponse.id).toBe("ui-1");
         expect(uiResponse.value).toBe("Allow");
 
+        // The answer closes the T3-side card: a user-input.resolved event
+        // with the dialog's request id (web/mobile derive open cards from
+        // activities, and the pending count projects from the same stream).
+        const resolvedEvents = (yield* Ref.get(collector.events)).filter(
+          (event) => event.type === "user-input.resolved",
+        );
+        expect(resolvedEvents).toHaveLength(1);
+        expect(resolvedEvents[0]!.requestId).toBe("ui-1");
+        expect(resolvedEvents[0]!.payload).toEqual({
+          answers: { "ui-1": "Allow" },
+        });
+
         // With the dialog resolved, pi's turn completes normally.
         yield* Deferred.await(settled);
         yield* adapter.stopAll();

@@ -1863,6 +1863,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       // resolves the dialog and never writes a response line), and the id
       // must stay pi's dialog id — so this cannot go through `send`, which
       // stamps its own correlation id and awaits a reply that never comes.
+      const sendResponse = (payload: Record<string, unknown>) =>
+        context.client
+          .sendFireAndForget({ type: "extension_ui_response", id: requestId, ...payload })
+          .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
+
       if (request.method === "select") {
         if (typeof selected !== "string") {
           return yield* new ProviderAdapterRequestError({
@@ -1871,31 +1876,36 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
             detail: "Pi select dialogs require exactly one answer.",
           });
         }
-        yield* context.client
-          .sendFireAndForget({ type: "extension_ui_response", id: requestId, value: selected })
-          .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
-        return;
+        yield* sendResponse({ value: selected });
+      } else if (request.method === "confirm") {
+        yield* sendResponse({ confirmed: selected === "Yes" });
+      } else {
+        // input / editor: non-empty value answers only (empty = unanswered,
+        // matches the custom-answer machinery — the client blocks empty
+        // submits; this is the server-side backstop).
+        if (typeof selected !== "string" || selected.trim().length === 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "extension_ui_response",
+            detail: "Pi text dialogs require a non-empty answer.",
+          });
+        }
+        yield* sendResponse({ value: selected });
       }
-      if (request.method === "confirm") {
-        const confirmed = selected === "Yes";
-        yield* context.client
-          .sendFireAndForget({ type: "extension_ui_response", id: requestId, confirmed })
-          .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
-        return;
-      }
-      // input / editor: non-empty value answers only (empty = unanswered,
-      // matches the custom-answer machinery — the client blocks empty
-      // submits; this is the server-side backstop).
-      if (typeof selected !== "string" || selected.trim().length === 0) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "extension_ui_response",
-          detail: "Pi text dialogs require a non-empty answer.",
-        });
-      }
-      yield* context.client
-        .sendFireAndForget({ type: "extension_ui_response", id: requestId, value: selected })
-        .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
+
+      // Close the T3-side question card: web and mobile derive open cards
+      // from activities, and the projected pending count reads the same
+      // stream, so a successful answer must resolve the request exactly
+      // like the other adapters do.
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId: context.activeTurnId,
+          requestId,
+        })),
+        type: "user-input.resolved",
+        payload: { answers },
+      });
     });
 
   const readThread: ProviderAdapterShape<ProviderAdapterError>["readThread"] = (threadId) =>

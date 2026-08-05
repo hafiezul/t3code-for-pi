@@ -309,6 +309,49 @@ describe("derivePendingUserInputs", () => {
     expect(derivePendingUserInputs(activities)).toEqual([]);
   });
 
+  it("clears stale pending user-input prompts for pi's orphaned-request phrasing", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "user-input-open-stale-pi",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "user-input.requested",
+        summary: "User input requested",
+        tone: "info",
+        payload: {
+          requestId: "req-user-input-stale-pi-1",
+          questions: [
+            {
+              id: "sandbox_mode",
+              header: "Sandbox",
+              question: "Which mode should be used?",
+              options: [
+                {
+                  label: "workspace-write",
+                  description: "Allow workspace writes only",
+                },
+              ],
+              multiSelect: false,
+            },
+          ],
+        },
+      }),
+      makeActivity({
+        id: "user-input-failed-stale-pi",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "provider.user-input.respond.failed",
+        summary: "Provider user input response failed",
+        tone: "error",
+        payload: {
+          requestId: "req-user-input-stale-pi-1",
+          detail:
+            "ProviderAdapterRequestError: Provider adapter request failed (pi) for extension_ui_response: Unknown pending pi user-input request: req-user-input-stale-pi-1",
+        },
+      }),
+    ];
+
+    expect(derivePendingUserInputs(activities)).toEqual([]);
+  });
+
   it("keeps text-kind questions with no options", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
