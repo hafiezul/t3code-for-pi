@@ -3,7 +3,10 @@
 OMP (`omp`, Oh My Pi) is a pi-lineage CLI with a richer RPC protocol than pi: settle is
 `agent_end` + `isTerminal` (no `agent_settled`), tool approvals surface as generic
 `extension_ui_request` `select` dialogs with options `["Approve","Deny"]`, subagents are
-observable read-only, and session rollback is in-place via `branch`. Resolved in wayfinder
+observable read-only, and session rollback goes through `branch` — which, corrected by the
+checkpoint-restore ticket ([Grilling: How T3 checkpoint restore rewinds an OMP session](https://github.com/hafiezul/t3code-for-pi/issues/70),
+asset [checkpoint-restore.md](../internals/omp-provider/checkpoint-restore.md)), **forks to a
+new session file** over RPC (the in-place leaf move is TUI/ACP-only). Resolved in wayfinder
 ticket [Grilling: OMP to T3 orchestration mapping](https://github.com/hafiezul/t3code-for-pi/issues/65)
 (map: [OMP as a first-class provider in T3 Code](https://github.com/hafiezul/t3code-for-pi/issues/62)):
 the OMP adapter is written fresh from the protocol (never cloned from the Pi adapter, which is
