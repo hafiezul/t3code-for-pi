@@ -189,6 +189,11 @@ interface PiAdapterSessionContext {
   readonly sessionScope: Scope.Closeable;
   session: ProviderSession;
   activeTurnId: TurnId | undefined;
+  /** The assistant stream failed during the active turn (pi's
+   *  `message_update` `error`, e.g. an upstream timeout). `agent_settled`
+   *  carries no outcome, so the turn's terminal state is decided here:
+   *  settled + error ⇒ `turn.completed` "failed", never a silent "completed". */
+  activeTurnError: string | undefined;
   /** Current assistant message item id, for message_start → message_end
    *  correlation (pi messages carry no ids of their own). */
   currentMessageItemId: string | undefined;
@@ -282,6 +287,24 @@ function piTextContent(message: Record<string, unknown> | undefined): string | u
     }
   }
   return parts.length > 0 ? parts.join("\n") : undefined;
+}
+
+/**
+ * Human-readable cause of a pi `message_update` `error`. pi puts the real
+ * reason on the failed assistant message (`error.errorMessage` — e.g.
+ * "Request timed out.", "Stream ended without finish_reason"); the event's
+ * own `reason` is only the stop category ("error" | "aborted").
+ */
+function piAssistantEventErrorMessage(assistantEvent: Record<string, unknown>): string {
+  const failedMessage = assistantEvent.error;
+  if (typeof failedMessage === "object" && failedMessage !== null) {
+    const errorMessage = (failedMessage as Record<string, unknown>).errorMessage;
+    if (typeof errorMessage === "string" && errorMessage.trim().length > 0) {
+      return errorMessage.trim();
+    }
+  }
+  const reason = assistantEvent.reason;
+  return typeof reason === "string" && reason.length > 0 ? reason : "Pi turn failed.";
 }
 
 /**
@@ -447,8 +470,7 @@ export function mapPiEvent(
           ];
         }
         case "error": {
-          const reason =
-            typeof assistantEvent.reason === "string" ? assistantEvent.reason : "error";
+          const reason = piAssistantEventErrorMessage(assistantEvent);
           return [
             {
               ...base,
@@ -1065,15 +1087,39 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       }
     }
 
+    // Track an assistant-stream failure for the active turn: pi surfaces it
+    // as `message_update` `error` (reason "error" | "aborted") and the
+    // terminal `agent_settled` carries no outcome, so this is the only place
+    // the turn's real result is knowable.
+    if (event.type === "message_update") {
+      const assistantEvent = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      if (assistantEvent?.type === "error" && context.activeTurnId !== undefined) {
+        context.activeTurnError = piAssistantEventErrorMessage(assistantEvent);
+      }
+    }
+
     if (event.type === "agent_settled") {
       const suppressed = yield* Ref.getAndSet(context.suppressNextSettled, false);
       if (!suppressed && context.activeTurnId !== undefined) {
         const turnId = context.activeTurnId;
         context.activeTurnId = undefined;
+        // `agent_settled` carries no outcome (pi fires it after errored and
+        // aborted runs too). A turn whose assistant stream errored — throttle,
+        // timeout, dropped connection — must not close as "completed": the
+        // message carries no content, so the thread would look done with an
+        // empty reply and the composer would offer send instead of stop.
+        const turnError = context.activeTurnError;
+        context.activeTurnError = undefined;
+        if (turnError !== undefined) {
+          yield* updateSession(context, { status: "error", lastError: turnError });
+        }
         yield* emit({
           ...(yield* buildEventBase({ threadId: context.threadId, turnId, raw: event })),
           type: "turn.completed",
-          payload: { state: "completed" },
+          payload:
+            turnError !== undefined
+              ? { state: "failed", errorMessage: turnError }
+              : { state: "completed" },
         });
         yield* Queue.offer(context.boundaryJobs, void 0);
       }
@@ -1140,6 +1186,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
             sessions.delete(context.threadId);
             const turnId = context.activeTurnId;
             context.activeTurnId = undefined;
+            context.activeTurnError = undefined;
             const message = `Pi process exited unexpectedly (code ${Number(code)}).`;
             if (turnId !== undefined) {
               yield* emit({
@@ -1396,6 +1443,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
           sessionScope,
           session,
           activeTurnId: undefined,
+          activeTurnError: undefined,
           currentMessageItemId: undefined,
           sessionFileRef: yield* Ref.make(stateSessionFile ?? resumeCursor?.sessionFile),
           sessionIdRef: yield* Ref.make(stateSessionId ?? resumeCursor?.sessionId),
@@ -1548,6 +1596,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       }
 
       context.activeTurnId = turnId;
+      context.activeTurnError = undefined;
       yield* updateSession(
         context,
         {
@@ -1717,6 +1766,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       );
       if (activeTurnId !== undefined) {
         context.activeTurnId = undefined;
+        context.activeTurnError = undefined;
         yield* updateSession(context, { status: "ready" }, { clearActiveTurnId: true });
         // The only turn-end event the orchestration layer consumes is
         // turn.completed — turn.aborted alone would leave the thread stuck

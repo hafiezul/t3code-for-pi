@@ -913,6 +913,114 @@ describe("makePiAdapter — scripted RPC process", () => {
       }),
   );
 
+  it.effect("fails the turn when the assistant stream errors and pi settles with no content", () =>
+    Effect.gen(function* () {
+      // Reproduces the reported bug: upstream throttle/timeout makes pi's
+      // assistant stream end with `stopReason: "error"` and zero content,
+      // then pi emits `agent_settled`. The turn must close as failed (so
+      // the session surfaces the error and the composer shows stop), not
+      // as a silent "completed" that leaves the thread looking done.
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_steering_mode":
+          case "set_follow_up_mode":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_update",
+                assistantMessageEvent: {
+                  type: "error",
+                  reason: "error",
+                  error: {
+                    role: "assistant",
+                    stopReason: "error",
+                    errorMessage: "Request timed out.",
+                    content: [],
+                  },
+                },
+              },
+              {
+                type: "message_end",
+                message: {
+                  role: "assistant",
+                  stopReason: "error",
+                  errorMessage: "Request timed out.",
+                  content: [],
+                },
+              },
+              { type: "agent_settled" },
+            ];
+          case "get_entries":
+            return [reply(command, { data: { entries: [], leafId: "leaf-1" } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/pi-project",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+
+      yield* Deferred.await(settled);
+      const events = yield* Ref.get(collector.events);
+      const completed = events.find((event) => event.type === "turn.completed");
+      expect(completed?.payload).toMatchObject({
+        state: "failed",
+        errorMessage: "Request timed out.",
+      });
+
+      const sessions = yield* adapter.listSessions();
+      const live = sessions.find((sessionEntry) => sessionEntry.threadId === threadId);
+      expect(live?.status).toBe("error");
+      expect(live?.lastError).toBe("Request timed out.");
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
   it.effect(
     "steers into the active turn, surfaces extension selects, and suppresses the post-abort settle",
     () =>
