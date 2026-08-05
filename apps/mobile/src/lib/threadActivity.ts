@@ -1074,7 +1074,8 @@ function deriveThreadFeedTurnFolds(
       continue;
     }
     const turnId =
-      entry.type === "message" && entry.message.role === "assistant"
+      entry.type === "message" &&
+      (entry.message.role === "assistant" || entry.message.role === "reasoning")
         ? entry.message.turnId
         : entry.type === "activity-group"
           ? entry.turnId

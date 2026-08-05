@@ -817,6 +817,75 @@ function useMarkdownStyles(onLinkPress: (href: string) => void): MarkdownStyleSe
   ]);
 }
 
+function ReasoningTimelineRow(props: {
+  readonly message: Extract<ThreadFeedEntry, { type: "message" }>["message"];
+  readonly markdownStyles: MarkdownStyleSets;
+  readonly skills?: ReadonlyArray<SelectableMarkdownSkill>;
+  readonly iconSubtleColor: string | ColorValue;
+  readonly onMarkdownLinkPress: (href: string) => void;
+}) {
+  const { message } = props;
+  const [expanded, setExpanded] = useState(message.streaming);
+  // Follow the stream lifecycle: open while thinking streams in, tuck away
+  // once the message completes so the response text reads cleanly. A manual
+  // toggle after completion survives (no further stream transitions).
+  useEffect(() => {
+    setExpanded(message.streaming);
+  }, [message.streaming]);
+  const hasText = message.text.trim().length > 0;
+  const styles = props.markdownStyles.assistant;
+
+  return (
+    <View className="mb-2 px-1">
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded }}
+        hitSlop={4}
+        onPress={() => {
+          void Haptics.selectionAsync();
+          setExpanded((value) => !value);
+        }}
+        className="min-h-8 flex-row items-center gap-1.5 self-start rounded-md px-0.5 py-0"
+      >
+        <Text className="font-t3-medium text-xs text-foreground opacity-60">
+          {message.streaming ? "Thinking…" : "Thinking"}
+        </Text>
+        <SymbolView
+          name={
+            expanded
+              ? { ios: "chevron.up", android: "keyboard_arrow_up" }
+              : { ios: "chevron.down", android: "keyboard_arrow_down" }
+          }
+          size={12}
+          tintColor={props.iconSubtleColor}
+          type="monochrome"
+        />
+      </Pressable>
+      {expanded && hasText ? (
+        <View className="ml-1 border-l-2 border-neutral-200/80 pl-3 opacity-80 dark:border-white/[0.08]">
+          {hasNativeSelectableMarkdownText() ? (
+            <SelectableMarkdownText
+              markdown={message.text}
+              skills={props.skills}
+              textStyle={styles.nativeTextStyle}
+              onLinkPress={props.onMarkdownLinkPress}
+            />
+          ) : (
+            <Markdown
+              options={{ gfm: true }}
+              renderers={styles.renderers}
+              styles={styles.styles}
+              theme={styles.theme}
+            >
+              {message.text}
+            </Markdown>
+          )}
+        </View>
+      ) : null}
+    </View>
+  );
+}
+
 function renderFeedEntry(
   info: { item: ThreadFeedEntry; index: number },
   props: Pick<ThreadFeedProps, "environmentId" | "skills"> & {
@@ -882,6 +951,17 @@ function renderFeedEntry(
   if (entry.type === "message") {
     const { message } = entry;
     const isUser = message.role === "user";
+    if (message.role === "reasoning") {
+      return (
+        <ReasoningTimelineRow
+          message={message}
+          markdownStyles={markdownStyles}
+          skills={props.skills}
+          iconSubtleColor={iconSubtleColor}
+          onMarkdownLinkPress={props.onMarkdownLinkPress}
+        />
+      );
+    }
     const styles = isUser ? markdownStyles.user : markdownStyles.assistant;
     const timestampLabel = formatMessageTime(isUser ? message.createdAt : message.updatedAt);
     const attachments = message.attachments ?? [];

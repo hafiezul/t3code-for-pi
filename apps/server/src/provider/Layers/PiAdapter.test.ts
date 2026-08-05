@@ -366,6 +366,65 @@ describe("mapPiEvent", () => {
     });
   });
 
+  it("keeps thinking blocks out of assistant message detail", () => {
+    const completed = mapPiEvent(
+      {
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [
+            { type: "thinking", text: "secret reasoning here" },
+            { type: "text", text: "Final answer" },
+          ],
+        },
+      },
+      { ...baseInput, messageItemId: "msg-1" },
+    );
+    expect(completed[0]!.payload).toMatchObject({
+      itemType: "assistant_message",
+      status: "completed",
+      detail: "Final answer",
+    });
+
+    const started = mapPiEvent(
+      {
+        type: "message_start",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", text: "secret reasoning here" }],
+        },
+      },
+      { ...baseInput, messageItemId: "msg-2" },
+    );
+    expect(started[0]!.payload).toMatchObject({
+      itemType: "assistant_message",
+      status: "inProgress",
+      title: "Assistant message",
+    });
+    expect((started[0]!.payload as { detail?: unknown }).detail).toBeUndefined();
+  });
+
+  it("keeps thinking blocks in custom_message extension output", () => {
+    const mapped = mapPiEvent(
+      {
+        type: "custom_message",
+        display: true,
+        content: [
+          { type: "thinking", text: "reasoning" },
+          { type: "text", text: "done" },
+        ],
+      },
+      baseInput,
+    );
+    expect(mapped).toEqual([
+      {
+        turnId: "pi-turn-1",
+        type: "extension.notice",
+        payload: { message: "reasoning\ndone", noticeType: "info" },
+      },
+    ]);
+  });
+
   it("maps bash tool execution to command_execution items keyed by toolCallId", () => {
     const started = mapPiEvent(
       {

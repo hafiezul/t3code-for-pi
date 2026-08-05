@@ -51,6 +51,7 @@ import {
   MousePointerClickIcon,
   PaintbrushIcon,
   MinusIcon,
+  SparklesIcon,
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
@@ -842,6 +843,7 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
         // Commentary (non-terminal assistant) rows carry no metadata row, so
         // they sit closer to the work that follows them.
         (row.kind === "message" && row.message.role === "assistant" && !row.showAssistantMeta) ||
+          (row.kind === "message" && row.message.role === "reasoning") ||
           row.kind === "work" ||
           row.kind === "work-toggle"
           ? "pb-2"
@@ -859,6 +861,9 @@ const TimelineRowContent = memo(function TimelineRowContent({ row }: { row: Time
       {row.kind === "message" && row.message.role === "user" ? <UserTimelineRow row={row} /> : null}
       {row.kind === "message" && row.message.role === "assistant" ? (
         <AssistantTimelineRow row={row} />
+      ) : null}
+      {row.kind === "message" && row.message.role === "reasoning" ? (
+        <ReasoningTimelineRow row={row} />
       ) : null}
       {row.kind === "proposed-plan" ? <ProposedPlanTimelineRow row={row} /> : null}
       {row.kind === "working" ? <WorkingTimelineRow row={row} /> : null}
@@ -1011,6 +1016,46 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
         <span>{row.label}</span>
         <Icon className="size-3.5" />
       </button>
+    </div>
+  );
+}
+
+function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
+  const ctx = use(TimelineRowCtx);
+  const [expanded, setExpanded] = useState(row.message.streaming);
+  // Follow the stream lifecycle: open while thinking streams in, tuck away
+  // once the message completes so the response text reads cleanly. A manual
+  // toggle after completion survives (no further stream transitions).
+  useEffect(() => {
+    setExpanded(row.message.streaming);
+  }, [row.message.streaming]);
+  const Icon = expanded ? ChevronDownIcon : ChevronRightIcon;
+  const hasText = row.message.text.trim().length > 0;
+  return (
+    <div className="relative min-w-0 px-1 py-0.5">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        data-scroll-anchor-ignore
+        onClick={() => setExpanded((value) => !value)}
+        className="flex cursor-pointer select-none items-center gap-1.5 rounded-md px-1 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      >
+        <SparklesIcon className="size-3.5 shrink-0" />
+        <span className="font-medium">{row.message.streaming ? "Thinking…" : "Thinking"}</span>
+        <Icon className="size-3.5" />
+      </button>
+      {expanded && hasText ? (
+        <div className="mt-1 border-l-2 border-border/60 pl-3">
+          <ChatMarkdown
+            text={row.message.text}
+            cwd={ctx.markdownCwd}
+            threadRef={ctx.threadRef ?? undefined}
+            isStreaming={Boolean(row.message.streaming)}
+            skills={ctx.skills}
+            className="text-muted-foreground"
+          />
+        </div>
+      ) : null}
     </div>
   );
 }

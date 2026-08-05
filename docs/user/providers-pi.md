@@ -116,6 +116,15 @@ You can change the picked model while a thread is running. The change applies on
 loss. If pi rejects the new model, T3 Code shows a notice and the session continues on the previous
 model.
 
+### Thinking in the Timeline
+
+When a model reasons before answering, the thinking shows in the chat as a
+collapsible **Thinking** row above the response — muted, with a chevron to
+open and close it. While the model is actively thinking the row stays open so
+you can watch it stream; once the answer lands, it collapses to a single
+**Thinking** line so the response text reads cleanly. The same applies to any
+provider that streams reasoning (pi, Claude, Codex, and OpenCode).
+
 ## Commands in the Composer
 
 Type `/` in the prompt to open the command menu. Pi's commands are listed there, grouped the way

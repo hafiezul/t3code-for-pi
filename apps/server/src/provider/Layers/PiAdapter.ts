@@ -264,7 +264,10 @@ function piToolItemType(
   return "dynamic_tool_call";
 }
 
-function piTextContent(message: Record<string, unknown> | undefined): string | undefined {
+function piTextContent(
+  message: Record<string, unknown> | undefined,
+  options?: { readonly includeThinking?: boolean },
+): string | undefined {
   if (!message) {
     return undefined;
   }
@@ -275,13 +278,24 @@ function piTextContent(message: Record<string, unknown> | undefined): string | u
   if (!Array.isArray(content)) {
     return undefined;
   }
+  const includeThinking = options?.includeThinking !== false;
   const parts: Array<string> = [];
   for (const part of content) {
     if (typeof part !== "object" || part === null) {
       continue;
     }
     const record = part as Record<string, unknown>;
-    const text = record.type === "text" || record.type === "thinking" ? record.text : undefined;
+    if (record.type !== "text" && record.type !== "thinking") {
+      continue;
+    }
+    // Thinking blocks stream as `reasoning_text` deltas and are projected as
+    // their own `role: "reasoning"` message; including them here would mix
+    // thinking into the assistant response text. Only custom/extension
+    // messages keep thinking inline (they carry no deltas).
+    if (record.type === "thinking" && !includeThinking) {
+      continue;
+    }
+    const text = record.text;
     if (typeof text === "string" && text.length > 0) {
       parts.push(text);
     }
@@ -379,6 +393,7 @@ export function mapPiEvent(
       if (message.role !== "assistant") {
         return [];
       }
+      const startedDetail = piTextContent(message, { includeThinking: false });
       return [
         {
           ...base,
@@ -388,7 +403,7 @@ export function mapPiEvent(
             itemType: "assistant_message",
             status: "inProgress",
             title: "Assistant message",
-            ...(piTextContent(message) ? { detail: piTextContent(message) } : {}),
+            ...(startedDetail ? { detail: startedDetail } : {}),
             data: event,
           },
         },
@@ -400,6 +415,7 @@ export function mapPiEvent(
       if (message.role !== "assistant") {
         return [];
       }
+      const completedDetail = piTextContent(message, { includeThinking: false });
       return [
         {
           ...base,
@@ -409,7 +425,7 @@ export function mapPiEvent(
             itemType: "assistant_message",
             status: "completed",
             title: "Assistant message",
-            ...(piTextContent(message) ? { detail: piTextContent(message) } : {}),
+            ...(completedDetail ? { detail: completedDetail } : {}),
             data: event,
           },
         },

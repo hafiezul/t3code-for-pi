@@ -978,6 +978,188 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
+  it("projects reasoning deltas into their own reasoning message finalized on item completion", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-1"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "hmm,",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-reasoning-delta-2"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: " let me think",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-reasoning-completed"),
+      provider: ProviderDriverKind.make("pi"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-reasoning"),
+      itemId: asItemId("item-reasoning"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) => message.role === "reasoning" && !message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.role === "reasoning",
+    );
+    expect(message?.id).toBe("reasoning:item-reasoning");
+    expect(message?.text).toBe("hmm, let me think");
+    expect(message?.streaming).toBe(false);
+    expect(message?.turnId).toBe(TurnId.make("turn-reasoning"));
+    // No assistant message may be synthesized from the reasoning-only turn.
+    expect(
+      thread.messages.some((entry: ProviderRuntimeTestMessage) => entry.role === "assistant"),
+    ).toBe(false);
+  });
+
+  it("streams reasoning deltas immediately when assistant streaming is enabled", async () => {
+    const harness = await createHarness({ serverSettings: { enableAssistantStreaming: true } });
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-streaming-reasoning-delta"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-reasoning"),
+      itemId: asItemId("item-streaming-reasoning"),
+      payload: {
+        streamKind: "reasoning_summary_text",
+        delta: "summarized approach",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) => message.role === "reasoning" && message.streaming,
+      ),
+    );
+    const message = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.role === "reasoning",
+    );
+    expect(message?.text).toBe("summarized approach");
+
+    harness.emit({
+      type: "turn.completed",
+      eventId: asEventId("evt-streaming-reasoning-turn-completed"),
+      provider: ProviderDriverKind.make("codex"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-streaming-reasoning"),
+      status: "completed",
+    });
+
+    await waitForThread(
+      harness.readModel,
+      (entry) =>
+        entry.messages.every(
+          (message: ProviderRuntimeTestMessage) =>
+            message.role !== "reasoning" || !message.streaming,
+        ) && entry.session?.status === "ready",
+    );
+    const finalized = (await harness.readModel()).threads
+      .find((entry) => entry.id === asThreadId("thread-1"))
+      ?.messages.find((entry: ProviderRuntimeTestMessage) => entry.role === "reasoning");
+    expect(finalized?.streaming).toBe(false);
+    expect(finalized?.text).toBe("summarized approach");
+  });
+
+  it("keeps reasoning and assistant messages separate within one turn", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-mixed-reasoning-delta"),
+      provider: ProviderDriverKind.make("open-code"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed"),
+      itemId: asItemId("item-mixed"),
+      payload: {
+        streamKind: "reasoning_text",
+        delta: "thinking text",
+      },
+    });
+    harness.emit({
+      type: "content.delta",
+      eventId: asEventId("evt-mixed-assistant-delta"),
+      provider: ProviderDriverKind.make("open-code"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed"),
+      itemId: asItemId("item-mixed"),
+      payload: {
+        streamKind: "assistant_text",
+        delta: "response text",
+      },
+    });
+    harness.emit({
+      type: "item.completed",
+      eventId: asEventId("evt-mixed-completed"),
+      provider: ProviderDriverKind.make("open-code"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-mixed"),
+      itemId: asItemId("item-mixed"),
+      payload: {
+        itemType: "assistant_message",
+        status: "completed",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.messages.some(
+        (message: ProviderRuntimeTestMessage) =>
+          message.role === "reasoning" &&
+          !message.streaming &&
+          entry.messages.some(
+            (assistant: ProviderRuntimeTestMessage) =>
+              assistant.role === "assistant" && !assistant.streaming,
+          ),
+      ),
+    );
+    const reasoning = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.role === "reasoning",
+    );
+    const assistant = thread.messages.find(
+      (entry: ProviderRuntimeTestMessage) => entry.role === "assistant",
+    );
+    expect(reasoning?.id).toBe("reasoning:item-mixed");
+    expect(reasoning?.text).toBe("thinking text");
+    expect(assistant?.id).toBe("assistant:item-mixed");
+    expect(assistant?.text).toBe("response text");
+  });
+
   it("preserves completed tool metadata on projected tool activities", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

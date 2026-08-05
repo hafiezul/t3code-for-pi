@@ -42,6 +42,10 @@ A single user-to-assistant work cycle inside a thread. It starts with user input
 
 A user-visible log item attached to a thread. In [the contracts][1], activities cover important non-message events like approvals, tool actions, and failures. They are projected into thread state in [projector.ts][4].
 
+#### Reasoning message
+
+A thread message with `role: "reasoning"` that holds a model's thinking (provider "thinking" blocks) for a turn, separate from the `assistant` response text so clients can render it as a collapsible, muted row. Provider adapters stream thinking as `reasoning_text`/`reasoning_summary_text` content deltas; [ProviderRuntimeIngestion.ts][5] projects them into reasoning messages with the same lifecycle as assistant text.
+
 ### Orchestration
 
 Orchestration is the server-side domain layer that turns runtime activity into stable app state. The main entry point is [OrchestrationEngine.ts][7], with core logic in [decider.ts][8] and [projector.ts][4].

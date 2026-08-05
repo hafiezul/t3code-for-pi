@@ -1046,7 +1046,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
-          role: "assistant",
+          role: command.role ?? "assistant",
           text: command.delta,
           turnId: command.turnId ?? null,
           streaming: true,
@@ -1073,7 +1073,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         payload: {
           threadId: command.threadId,
           messageId: command.messageId,
-          role: "assistant",
+          role: command.role ?? "assistant",
           text: "",
           turnId: command.turnId ?? null,
           streaming: false,

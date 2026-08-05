@@ -223,6 +223,58 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
+  it("renders completed reasoning collapsed and streaming reasoning expanded", () => {
+    const doneMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-reasoning-done",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("reasoning-done"),
+              role: "reasoning",
+              text: "because of physics",
+              turnId: null,
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: false,
+            },
+          },
+        ]}
+      />,
+    );
+    expect(doneMarkup).toContain("Thinking");
+    expect(doneMarkup).toContain('aria-expanded="false"');
+    expect(doneMarkup).not.toContain("because of physics");
+
+    const streamingMarkup = renderToStaticMarkup(
+      <MessagesTimeline
+        {...buildProps()}
+        timelineEntries={[
+          {
+            id: "entry-reasoning-streaming",
+            kind: "message",
+            createdAt: MESSAGE_CREATED_AT,
+            message: {
+              id: MessageId.make("reasoning-streaming"),
+              role: "reasoning",
+              text: "hmm,",
+              turnId: TurnId.make("turn-streaming"),
+              createdAt: MESSAGE_CREATED_AT,
+              updatedAt: MESSAGE_CREATED_AT,
+              streaming: true,
+            },
+          },
+        ]}
+      />,
+    );
+    expect(streamingMarkup).toContain("Thinking…");
+    expect(streamingMarkup).toContain('aria-expanded="true"');
+    expect(streamingMarkup).toContain("hmm,");
+  });
+
   it("uses the larger leading inset only when the top fade is enabled", () => {
     const timelineEntries = [buildUserTimelineEntry("Hello")];
 

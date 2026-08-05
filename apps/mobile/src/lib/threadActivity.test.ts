@@ -426,6 +426,70 @@ describe("buildThreadFeed", () => {
     });
   });
 
+  it("folds reasoning messages into their turn", () => {
+    const turnId = TurnId.make("turn-reasoning");
+    const thread = makeThread({
+      id: ThreadId.make("thread-reasoning"),
+      projectId: ProjectId.make("project-1"),
+      title: "Reasoning fold",
+      latestTurn: {
+        turnId,
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:00.000Z",
+        completedAt: "2026-04-01T00:00:18.000Z",
+        assistantMessageId: MessageId.make("assistant-final"),
+      },
+      messages: [
+        {
+          id: MessageId.make("user-1"),
+          role: "user",
+          text: "Why?",
+          turnId: null,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:00.000Z",
+          updatedAt: "2026-04-01T00:00:00.000Z",
+        },
+        {
+          id: MessageId.make("reasoning-1"),
+          role: "reasoning",
+          text: "because of physics",
+          turnId,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:05.000Z",
+          updatedAt: "2026-04-01T00:00:06.000Z",
+        },
+        {
+          id: MessageId.make("assistant-final"),
+          role: "assistant",
+          text: "Gravity.",
+          turnId,
+          streaming: false,
+          createdAt: "2026-04-01T00:00:07.000Z",
+          updatedAt: "2026-04-01T00:00:08.000Z",
+        },
+      ],
+      activities: [],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const collapsed = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set());
+    // Reasoning hides behind the settled turn's fold; the user boundary stays.
+    expect(collapsed.map((entry) => entry.id)).toEqual([
+      "user-1",
+      "turn-fold:turn-reasoning",
+      "assistant-final",
+    ]);
+
+    const expanded = deriveThreadFeedPresentation(feed, thread.latestTurn, new Set([turnId]));
+    expect(expanded.map((entry) => entry.id)).toEqual([
+      "user-1",
+      "turn-fold:turn-reasoning",
+      "reasoning-1",
+      "assistant-final",
+    ]);
+  });
+
   it("keeps an active turn expanded and classifies error-shaped tool output", () => {
     const turnId = TurnId.make("turn-running");
     const thread = makeThread({

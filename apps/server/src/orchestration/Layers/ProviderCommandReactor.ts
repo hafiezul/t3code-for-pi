@@ -98,7 +98,7 @@ const THREAD_TITLE_CONTEXT_TRUNCATION_MARKER = "[Earlier content truncated]\n\n"
 
 function formatThreadTitleContext(
   messages: ReadonlyArray<{
-    readonly role: "user" | "assistant" | "system";
+    readonly role: "user" | "assistant" | "system" | "reasoning";
     readonly text: string;
     readonly attachments?: ReadonlyArray<ChatAttachment> | undefined;
   }>,
@@ -111,7 +111,9 @@ function formatThreadTitleContext(
   const retainedAttachments: Array<ChatAttachment> = [];
 
   for (const message of messages.toReversed()) {
-    if (message.role === "system") {
+    // Thinking text is process noise for title generation; only user and
+    // assistant content shapes the title.
+    if (message.role === "system" || message.role === "reasoning") {
       continue;
     }
     const text = message.text.trim();

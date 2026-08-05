@@ -541,6 +541,135 @@ describe("deriveMessagesTimelineRows", () => {
     ).toBeDefined();
   });
 
+  it("folds reasoning messages into their turn and keeps them out of assistant copy state", () => {
+    const timelineEntries = [
+      {
+        id: "user-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:00Z",
+        message: {
+          id: "user-1" as never,
+          role: "user" as const,
+          text: "Why?",
+          turnId: null,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "reasoning-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:05Z",
+        message: {
+          id: "reasoning-1" as never,
+          role: "reasoning" as const,
+          text: "because of physics",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:05Z",
+          updatedAt: "2026-01-01T00:00:06Z",
+          streaming: false,
+        },
+      },
+      {
+        id: "assistant-final-entry",
+        kind: "message" as const,
+        createdAt: "2026-01-01T00:00:07Z",
+        message: {
+          id: "assistant-final" as never,
+          role: "assistant" as const,
+          text: "Gravity.",
+          turnId: "turn-1" as never,
+          createdAt: "2026-01-01T00:00:07Z",
+          updatedAt: "2026-01-01T00:00:08Z",
+          streaming: false,
+        },
+      },
+    ];
+
+    const collapsedRows = deriveMessagesTimelineRows({
+      timelineEntries,
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    // Reasoning is commentary: it hides behind the settled turn's fold.
+    expect(collapsedRows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "assistant-final-entry",
+    ]);
+
+    const expandedRows = deriveMessagesTimelineRows({
+      timelineEntries,
+      expandedTurnIds: new Set(["turn-1" as never]),
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    const reasoningRows = expandedRows.filter(
+      (row): row is Extract<(typeof expandedRows)[number], { kind: "message" }> =>
+        row.kind === "message" && row.message.role === "reasoning",
+    );
+    expect(reasoningRows).toHaveLength(1);
+    expect(reasoningRows[0]?.message.text).toBe("because of physics");
+    // Reasoning never counts as the turn's terminal assistant copy target.
+    const assistantRows = expandedRows.filter(
+      (row): row is Extract<(typeof expandedRows)[number], { kind: "message" }> =>
+        row.kind === "message" && row.message.role === "assistant",
+    );
+    expect(assistantRows).toHaveLength(1);
+    expect(assistantRows[0]?.showAssistantCopyButton).toBe(true);
+  });
+
+  it("does not fold a turn whose reasoning is still streaming", () => {
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        {
+          id: "user-entry",
+          kind: "message" as const,
+          createdAt: "2026-01-01T00:00:00Z",
+          message: {
+            id: "user-1" as never,
+            role: "user" as const,
+            text: "How?",
+            turnId: null,
+            createdAt: "2026-01-01T00:00:00Z",
+            updatedAt: "2026-01-01T00:00:00Z",
+            streaming: false,
+          },
+        },
+        {
+          id: "reasoning-entry",
+          kind: "message" as const,
+          createdAt: "2026-01-01T00:00:05Z",
+          message: {
+            id: "reasoning-streaming" as never,
+            role: "reasoning" as const,
+            text: "hmm",
+            turnId: "turn-1" as never,
+            createdAt: "2026-01-01T00:00:05Z",
+            updatedAt: "2026-01-01T00:00:05Z",
+            streaming: true,
+          },
+        },
+      ],
+      isWorking: true,
+      activeTurnStartedAt: "2026-01-01T00:00:05Z",
+      turnDiffSummaryByAssistantMessageId: new Map(),
+      revertTurnCountByUserMessageId: new Map(),
+    });
+    expect(rows.some((row) => row.kind === "turn-fold")).toBe(false);
+    expect(
+      rows.some(
+        (row) =>
+          row.kind === "message" && row.message.role === "reasoning" && row.message.streaming,
+      ),
+    ).toBe(true);
+  });
+
   it("derives a sane duration for a steer-superseded turn with one instant commentary message", () => {
     // A steer ends the previous turn early: its only message completes the
     // instant it is created, and trailing work entries land after it. The

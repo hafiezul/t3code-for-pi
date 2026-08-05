@@ -223,7 +223,14 @@ export const OrchestrationProject = Schema.Struct({
 });
 export type OrchestrationProject = typeof OrchestrationProject.Type;
 
-export const OrchestrationMessageRole = Schema.Literals(["user", "assistant", "system"]);
+export const OrchestrationMessageRole = Schema.Literals([
+  "user",
+  "assistant",
+  "system",
+  // Model reasoning (provider "thinking") projected as its own message so
+  // clients can render it distinct from the response text.
+  "reasoning",
+]);
 export type OrchestrationMessageRole = typeof OrchestrationMessageRole.Type;
 
 export const OrchestrationMessage = Schema.Struct({
@@ -840,6 +847,9 @@ const ThreadMessageAssistantDeltaCommand = Schema.Struct({
   threadId: ThreadId,
   messageId: MessageId,
   delta: Schema.String,
+  // Which message kind this delta appends to; absent means assistant text.
+  // Reasoning deltas reuse this command so the projector stays role-agnostic.
+  role: Schema.optional(OrchestrationMessageRole),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
@@ -849,6 +859,7 @@ const ThreadMessageAssistantCompleteCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   messageId: MessageId,
+  role: Schema.optional(OrchestrationMessageRole),
   turnId: Schema.optional(TurnId),
   createdAt: IsoDateTime,
 });
