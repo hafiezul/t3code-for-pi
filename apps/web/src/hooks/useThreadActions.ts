@@ -3,7 +3,11 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import {
+  isAtomCommandInterrupted,
+  settlePromise,
+  squashAtomCommandFailure,
+} from "@t3tools/client-runtime/state/runtime";
 import { canSettle, canSnooze } from "@t3tools/client-runtime/state/thread-settled";
 import { EnvironmentId, type ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
@@ -370,14 +374,8 @@ export function useThreadActions() {
               input: { cwd: threadProject.workspaceRoot },
             })
           : null;
-      const cleanupFailure =
-        removeResult._tag === "Failure"
-          ? removeResult
-          : refreshResult?._tag === "Failure"
-            ? refreshResult
-            : null;
-      if (cleanupFailure) {
-        const error = squashAtomCommandFailure(cleanupFailure);
+      if (removeResult._tag === "Failure" && !isAtomCommandInterrupted(removeResult)) {
+        const error = squashAtomCommandFailure(removeResult);
         const message = error instanceof Error ? error.message : "Unknown error removing worktree.";
         console.error("Failed to remove orphaned worktree after thread deletion", {
           threadId: threadRef.threadId,
@@ -392,8 +390,16 @@ export function useThreadActions() {
             description: `Could not remove ${displayWorktreePath ?? orphanedWorktreePath}. ${message}`,
           }),
         );
-        return cleanupFailure;
+      } else if (refreshResult?._tag === "Failure" && !isAtomCommandInterrupted(refreshResult)) {
+        console.error("Failed to refresh VCS status after worktree removal", {
+          threadId: threadRef.threadId,
+          projectCwd: threadProject.workspaceRoot,
+          worktreePath: orphanedWorktreePath,
+          error: squashAtomCommandFailure(refreshResult),
+        });
       }
+      // Cleanup is best-effort: thread deletion already succeeded, so a
+      // cleanup failure must not surface as a deletion failure to callers.
       return deleteResult;
     },
     [
