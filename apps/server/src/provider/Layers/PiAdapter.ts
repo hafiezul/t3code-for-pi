@@ -1859,6 +1859,10 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       context.pendingUiRequests.delete(requestId);
       const answer = answers[requestId];
       const selected = Array.isArray(answer) ? answer[0] : answer;
+      // extension_ui_response is fire-and-forget on pi's side (rpc-mode.js
+      // resolves the dialog and never writes a response line), and the id
+      // must stay pi's dialog id — so this cannot go through `send`, which
+      // stamps its own correlation id and awaits a reply that never comes.
       if (request.method === "select") {
         if (typeof selected !== "string") {
           return yield* new ProviderAdapterRequestError({
@@ -1868,14 +1872,14 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
           });
         }
         yield* context.client
-          .send({ type: "extension_ui_response", id: requestId, value: selected })
+          .sendFireAndForget({ type: "extension_ui_response", id: requestId, value: selected })
           .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
         return;
       }
       if (request.method === "confirm") {
         const confirmed = selected === "Yes";
         yield* context.client
-          .send({ type: "extension_ui_response", id: requestId, confirmed })
+          .sendFireAndForget({ type: "extension_ui_response", id: requestId, confirmed })
           .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
         return;
       }
@@ -1890,7 +1894,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         });
       }
       yield* context.client
-        .send({ type: "extension_ui_response", id: requestId, value: selected })
+        .sendFireAndForget({ type: "extension_ui_response", id: requestId, value: selected })
         .pipe(Effect.mapError((cause) => mapPiRequestError("extension_ui_response", cause)));
     });
 

@@ -68,6 +68,18 @@ export interface PiRpcClient {
     command: Record<string, unknown>,
   ) => Effect.Effect<PiRpcResponse, PiRpcCommandError>;
   /**
+   * Write one command without correlation or awaiting a response line.
+   * The command goes on the wire exactly as given — its `id` field belongs
+   * to the receiver's bookkeeping (e.g. pi's extension dialog ids), not to
+   * this client's request/response table. pi never answers these lines
+   * (extension_ui_response is fire-and-forget in rpc-mode.js), so awaiting
+   * one would time out. Writes stay serialized with `send` via the shared
+   * permit.
+   */
+  readonly sendFireAndForget: (
+    command: Record<string, unknown>,
+  ) => Effect.Effect<void, PiRpcCommandError>;
+  /**
    * Raw parsed pi agent events (every non-response stdout line), in
    * arrival order. Shuts down when the client stops.
    */
@@ -286,8 +298,24 @@ export const makePiRpcClient = Effect.fn("makePiRpcClient")(function* (input: {
       return result;
     });
 
+  const sendFireAndForget: PiRpcClient["sendFireAndForget"] = (command) =>
+    Effect.gen(function* () {
+      if (yield* Ref.get(stoppedRef)) {
+        return yield* new PiRpcCommandError({
+          command: String(command.type ?? "rpc"),
+          detail: "pi process is stopped.",
+        });
+      }
+      // No correlation id, no pending entry, no await — the command goes on
+      // the wire exactly as given (its `id` field belongs to pi's dialog
+      // bookkeeping, not ours). Writes stay serialized with `send` via the
+      // shared permit.
+      yield* writePermit.withPermit(writeCommand(command));
+    });
+
   return {
     send,
+    sendFireAndForget,
     events,
     failPending: failAllPending,
     stop: Effect.gen(function* () {

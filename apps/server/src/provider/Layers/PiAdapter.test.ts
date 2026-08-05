@@ -1398,6 +1398,143 @@ describe("makePiAdapter — scripted RPC process", () => {
   );
 
   it.effect(
+    "answers a select dialog without awaiting a reply line, matching real pi's extension_ui_response handling",
+    () =>
+      Effect.gen(function* () {
+        // Real pi (dist/modes/rpc/rpc-mode.js handleInputLine) resolves its
+        // pending extension dialog and emits NO response line for
+        // extension_ui_response — the turn simply continues on stdout. The
+        // scripted process mirrors that: no `reply(command)`, just the
+        // settle that the resolved dialog lets through.
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_steering_mode":
+            case "set_follow_up_mode":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // A live turn: assistant work started (blocks the adapter's
+              // synthetic command-turn completion), no agent_settled yet.
+              return [
+                reply(command),
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_end",
+                  message: { role: "assistant", content: [{ type: "text", text: "ok" }] },
+                },
+              ];
+            case "steer":
+              return [
+                reply(command),
+                {
+                  type: "extension_ui_request",
+                  id: "ui-1",
+                  method: "select",
+                  title: "Allow dangerous command?",
+                  options: ["Allow", "Block"],
+                },
+              ];
+            case "get_entries":
+              return [
+                reply(command, {
+                  data: { entries: [], leafId: "leaf-1" },
+                }),
+              ];
+            case "extension_ui_response":
+              // Real pi resolves the dialog and writes nothing back; the
+              // unanswered dialog was blocking the agent, so the settle
+              // flows now.
+              return [{ type: "agent_settled" }];
+            case "abort":
+              // Real pi emits the settle before the abort response.
+              return [{ type: "agent_settled" }, reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const uiRequested = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled, uiRequested },
+          matches: (event) =>
+            event.type === "turn.completed" || event.type === "session.exited"
+              ? "settled"
+              : event.type === "user-input.requested"
+                ? "uiRequested"
+                : undefined,
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/pi-project",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+          runtimeMode: "full-access",
+        });
+        // Queue-mode pins + state sync.
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        const first = yield* adapter.sendTurn({
+          threadId,
+          input: "do the thing",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        const second = yield* adapter.sendTurn({
+          threadId,
+          input: "wait, do this instead",
+          modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        });
+        expect(second.turnId).toBe(first.turnId);
+        expect((yield* nextCommand(state)).type).toBe("steer");
+
+        // The steer response carried an extension select dialog: surfaced as
+        // user-input.requested and answered with an extension_ui_response.
+        yield* Deferred.await(uiRequested);
+        const answering = yield* adapter
+          .respondToUserInput(threadId, ApprovalRequestId.make("ui-1"), { "ui-1": "Allow" })
+          .pipe(Effect.forkChild);
+        // The old transport awaited a response line pi never sends; fast-
+        // forward past its 30s timeout so the failure surfaces quickly.
+        yield* TestClock.adjust("31 seconds");
+        const outcome = yield* Fiber.join(answering).pipe(Effect.exit);
+        expect(Exit.isSuccess(outcome)).toBe(true);
+
+        // The command on the wire keeps pi's dialog id (not a transport
+        // correlation uuid), so pi can match it to the pending dialog.
+        const uiResponse = yield* nextCommand(state);
+        expect(uiResponse.type).toBe("extension_ui_response");
+        expect(uiResponse.id).toBe("ui-1");
+        expect(uiResponse.value).toBe("Allow");
+
+        // With the dialog resolved, pi's turn completes normally.
+        yield* Deferred.await(settled);
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect(
     "interrupts an active turn as 'interrupted' even though real pi settles before the abort response",
     () =>
       Effect.gen(function* () {
