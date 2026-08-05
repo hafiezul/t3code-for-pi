@@ -508,6 +508,124 @@ export const PiSettings = makeProviderSettingsSchema(
 );
 export type PiSettings = typeof PiSettings.Type;
 
+export const OmpSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("omp").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the OMP binary.",
+        providerSettingsForm: { placeholder: "omp", clearWhenEmpty: "omit" },
+      }),
+    ),
+    launchArgs: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Launch arguments",
+        description: "Additional CLI arguments passed to omp on session start.",
+        providerSettingsForm: {
+          placeholder: "e.g. --no-lsp",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    // Per-instance OMP profile (`--profile <name>`): isolates auth,
+    // sessions, settings, and caches. Empty = OMP's default profile.
+    profile: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Profile",
+        description: "OMP profile to launch with (empty = default profile).",
+        providerSettingsForm: { placeholder: "Optional", clearWhenEmpty: "omit" },
+      }),
+    ),
+    // The five mainstream API keys OMP reads from the environment. Injected
+    // as env vars (ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY,
+    // GROQ_API_KEY, XAI_API_KEY) when set; all other OMP-accepted keys ride
+    // the per-instance environment-var editor.
+    anthropicApiKey: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Anthropic API key",
+        description: "Injected as ANTHROPIC_API_KEY for omp sessions.",
+        providerSettingsForm: {
+          control: "password",
+          placeholder: "Optional",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    openaiApiKey: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "OpenAI API key",
+        description: "Injected as OPENAI_API_KEY for omp sessions.",
+        providerSettingsForm: {
+          control: "password",
+          placeholder: "Optional",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    geminiApiKey: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Google Gemini API key",
+        description: "Injected as GEMINI_API_KEY for omp sessions.",
+        providerSettingsForm: {
+          control: "password",
+          placeholder: "Optional",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    groqApiKey: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Groq API key",
+        description: "Injected as GROQ_API_KEY for omp sessions.",
+        providerSettingsForm: {
+          control: "password",
+          placeholder: "Optional",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    xaiApiKey: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "xAI API key",
+        description: "Injected as XAI_API_KEY for omp sessions.",
+        providerSettingsForm: {
+          control: "password",
+          placeholder: "Optional",
+          clearWhenEmpty: "omit",
+        },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: [
+      "binaryPath",
+      "launchArgs",
+      "profile",
+      "anthropicApiKey",
+      "openaiApiKey",
+      "geminiApiKey",
+      "groqApiKey",
+      "xaiApiKey",
+    ],
+  },
+);
+export type OmpSettings = typeof OmpSettings.Type;
+
 export const ObservabilitySettings = Schema.Struct({
   otlpTracesUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   otlpMetricsUrl: TrimmedString.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
@@ -628,6 +746,7 @@ export const ServerSettings = Schema.Struct({
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     pi: PiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    omp: OmpSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -743,6 +862,19 @@ const PiSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
+const OmpSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  launchArgs: Schema.optionalKey(TrimmedString),
+  profile: Schema.optionalKey(TrimmedString),
+  anthropicApiKey: Schema.optionalKey(TrimmedString),
+  openaiApiKey: Schema.optionalKey(TrimmedString),
+  geminiApiKey: Schema.optionalKey(TrimmedString),
+  groqApiKey: Schema.optionalKey(TrimmedString),
+  xaiApiKey: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 export const ServerSettingsPatch = Schema.Struct({
   // Server settings
   enableAssistantStreaming: Schema.optionalKey(Schema.Boolean),
@@ -784,6 +916,7 @@ export const ServerSettingsPatch = Schema.Struct({
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
       pi: Schema.optionalKey(PiSettingsPatch),
+      omp: Schema.optionalKey(OmpSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual

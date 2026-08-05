@@ -297,3 +297,59 @@ describe("ServerSettingsPatch string normalization", () => {
     expect(encoded.providers?.codex?.launchArgs).toBe("--strict-config");
   });
 });
+
+describe("OmpSettings", () => {
+  it("defaults to the omp binary, enabled, and the default profile", () => {
+    const settings = decodeServerSettings({});
+    const omp = settings.providers.omp;
+
+    expect(omp.enabled).toBe(true);
+    expect(omp.binaryPath).toBe("omp");
+    expect(omp.profile).toBe("");
+    expect(omp.launchArgs).toBe("");
+    for (const key of [
+      "anthropicApiKey",
+      "openaiApiKey",
+      "geminiApiKey",
+      "groqApiKey",
+      "xaiApiKey",
+    ] as const) {
+      expect(omp[key]).toBe("");
+    }
+  });
+
+  it("keeps a configured profile and API keys", () => {
+    const settings = decodeServerSettings({
+      providers: {
+        omp: {
+          binaryPath: "/opt/homebrew/bin/omp",
+          profile: "work",
+          anthropicApiKey: "sk-ant-test",
+          launchArgs: "--no-lsp",
+        },
+      },
+    });
+    const omp = settings.providers.omp;
+
+    expect(omp.binaryPath).toBe("/opt/homebrew/bin/omp");
+    expect(omp.profile).toBe("work");
+    expect(omp.anthropicApiKey).toBe("sk-ant-test");
+    expect(omp.launchArgs).toBe("--no-lsp");
+    expect(omp.enabled).toBe(true);
+  });
+
+  it("applies profile and key patches without disturbing other providers", () => {
+    const patch = decodeServerSettingsPatch({
+      providers: {
+        omp: {
+          profile: "  isolated  ",
+          groqApiKey: "  gsk-test  ",
+        },
+      },
+    });
+
+    expect(patch.providers?.omp?.profile).toBe("isolated");
+    expect(patch.providers?.omp?.groqApiKey).toBe("gsk-test");
+    expect(patch.providers?.pi).toBeUndefined();
+  });
+});

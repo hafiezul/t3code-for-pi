@@ -517,13 +517,17 @@ export function runtimeEventToActivities(
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "info",
-          kind: "task.started",
+          // OMP subagents ride the generic task activity slot with a
+          // distinct kind so the work log renders them as subagent rows.
+          kind: event.payload.taskType === "subagent" ? "subagent.started" : "task.started",
           summary:
-            event.payload.taskType === "plan"
-              ? "Plan task started"
-              : event.payload.taskType
-                ? `${event.payload.taskType} task started`
-                : "Task started",
+            event.payload.taskType === "subagent"
+              ? "Subagent started"
+              : event.payload.taskType === "plan"
+                ? "Plan task started"
+                : event.payload.taskType
+                  ? `${event.payload.taskType} task started`
+                  : "Task started",
           payload: {
             taskId: event.payload.taskId,
             ...(event.payload.taskType ? { taskType: event.payload.taskType } : {}),
@@ -543,7 +547,7 @@ export function runtimeEventToActivities(
           id: event.eventId,
           createdAt: event.createdAt,
           tone: "info",
-          kind: "task.progress",
+          kind: event.payload.taskType === "subagent" ? "subagent.progress" : "task.progress",
           summary:
             event.payload.description.trim().length > 0
               ? truncateDetail(event.payload.description, 120)
@@ -565,14 +569,20 @@ export function runtimeEventToActivities(
     }
 
     case "task.completed": {
+      const isSubagent = event.payload.taskType === "subagent";
       return [
         {
           id: event.eventId,
           createdAt: event.createdAt,
           tone: event.payload.status === "failed" ? "error" : "info",
-          kind: "task.completed",
-          summary:
-            event.payload.status === "failed"
+          kind: isSubagent ? "subagent.completed" : "task.completed",
+          summary: isSubagent
+            ? event.payload.status === "failed"
+              ? "Subagent failed"
+              : event.payload.status === "stopped"
+                ? "Subagent stopped"
+                : "Subagent completed"
+            : event.payload.status === "failed"
               ? "Task failed"
               : event.payload.status === "stopped"
                 ? "Task stopped"

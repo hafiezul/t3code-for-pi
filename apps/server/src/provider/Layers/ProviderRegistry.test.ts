@@ -1557,6 +1557,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                   grok: { enabled: false },
                   opencode: { enabled: false },
                   pi: { enabled: false },
+                  omp: { enabled: false },
                 },
               }),
             ),
@@ -1810,6 +1811,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "codex",
                 "cursor",
                 "grok",
+                "omp",
                 "opencode",
                 "pi",
               ]);

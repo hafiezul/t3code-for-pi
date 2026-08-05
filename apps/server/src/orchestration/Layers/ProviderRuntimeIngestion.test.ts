@@ -3356,6 +3356,77 @@ describe("ProviderRuntimeIngestion", () => {
     ).toBe("# Plan title");
   });
 
+  it("projects OMP subagent lifecycle chunks into subagent activity rows", async () => {
+    const harness = await createHarness();
+    const now = "2026-01-01T00:00:00.000Z";
+
+    // One stable activity id per subagent (the adapter reuses the event id
+    // across the lifecycle), so the started/progress/completed frames
+    // upsert a single row in place.
+    harness.emit({
+      type: "task.started",
+      eventId: asEventId("subagent:sa-1"),
+      provider: ProviderDriverKind.make("omp"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-task-1"),
+      payload: {
+        taskId: "subagent:sa-1",
+        taskType: "subagent",
+        description: "tester",
+      },
+    });
+
+    harness.emit({
+      type: "task.progress",
+      eventId: asEventId("subagent:sa-1"),
+      provider: ProviderDriverKind.make("omp"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-task-1"),
+      payload: {
+        taskId: "subagent:sa-1",
+        taskType: "subagent",
+        description: "running step 2",
+      },
+    });
+
+    harness.emit({
+      type: "task.completed",
+      eventId: asEventId("subagent:sa-1"),
+      provider: ProviderDriverKind.make("omp"),
+      createdAt: now,
+      threadId: asThreadId("thread-1"),
+      turnId: asTurnId("turn-task-1"),
+      payload: {
+        taskId: "subagent:sa-1",
+        taskType: "subagent",
+        status: "failed",
+        summary: "hit an upstream timeout",
+      },
+    });
+
+    const thread = await waitForThread(harness.readModel, (entry) =>
+      entry.activities.some(
+        (activity: ProviderRuntimeTestActivity) => activity.kind === "subagent.completed",
+      ),
+    );
+
+    const rows = thread.activities.filter(
+      (activity: ProviderRuntimeTestActivity) => activity.id === "subagent:sa-1",
+    );
+
+    // The row is upserted in place: one row, terminal kind, error tone.
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.kind).toBe("subagent.completed");
+    expect(rows[0]?.summary).toBe("Subagent failed");
+    expect(rows[0]?.tone).toBe("error");
+    expect(rows[0]?.payload).toMatchObject({
+      taskId: "subagent:sa-1",
+      status: "failed",
+    });
+  });
+
   it("titles task activities with the task description, including on completion", async () => {
     const harness = await createHarness();
     const now = "2026-01-01T00:00:00.000Z";

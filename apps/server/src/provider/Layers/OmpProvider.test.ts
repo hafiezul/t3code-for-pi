@@ -1,0 +1,395 @@
+import * as PlatformError from "effect/PlatformError";
+import * as Effect from "effect/Effect";
+import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
+import * as Stream from "effect/Stream";
+import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { describe, expect, it } from "@effect/vitest";
+import { OmpSettings } from "@t3tools/contracts";
+
+import {
+  checkOmpProviderStatus,
+  flattenOmpCommands,
+  flattenOmpModels,
+  MINIMUM_OMP_VERSION,
+  parseOmpCommands,
+  parseOmpModels,
+} from "./OmpProvider.ts";
+
+const decodeOmpSettings = Schema.decodeSync(OmpSettings);
+const decodeSettings = (overrides: Partial<OmpSettings> = {}): OmpSettings =>
+  decodeOmpSettings(overrides);
+
+const makeScriptedSpawner = (script: {
+  readonly onArgs: (args: ReadonlyArray<string>) => ChildProcessSpawner.ChildProcessHandle;
+}) =>
+  ChildProcessSpawner.make((command) =>
+    Effect.sync(() => {
+      if (!ChildProcess.isStandardCommand(command)) {
+        throw new Error("expected a standard omp command");
+      }
+      return script.onArgs(command.args);
+    }),
+  );
+
+const makeStdoutHandle = (stdout: string, exitCode = 0) =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(exitCode)),
+    isRunning: Effect.succeed(false),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.encodeText(Stream.make(stdout)),
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+const runProbe = (
+  spawner: ChildProcessSpawner.ChildProcessSpawner["Service"],
+  settings: OmpSettings = decodeSettings(),
+) =>
+  Effect.gen(function* () {
+    const result = yield* checkOmpProviderStatus(settings, "/tmp/omp-probe-test", undefined);
+    return result;
+  }).pipe(
+    Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+    Effect.runPromise,
+  );
+
+describe("parseOmpModels", () => {
+  it("parses response rows into provider/name pairs with thinking effects", () => {
+    const stdout = [
+      JSON.stringify({ type: "ready", protocolVersion: 2 }),
+      JSON.stringify({
+        type: "response",
+        command: "get_available_models",
+        success: true,
+        data: {
+          models: [
+            {
+              provider: "opencode-go",
+              model: { name: "deepseek-v4-flash", thinking: { effects: ["high", "max"] } },
+            },
+            { provider: "anthropic", model: { name: "claude-opus-4-8" } },
+            { provider: "openai-codex", model: { name: "gpt-5.4", thinking: { effects: [] } } },
+          ],
+        },
+      }),
+      JSON.stringify({ type: "response", command: "get_available_commands", success: true }),
+    ].join("\n");
+
+    const rows = parseOmpModels(stdout);
+    expect(rows).toEqual([
+      { provider: "opencode-go", name: "deepseek-v4-flash", thinkingEffects: ["high", "max"] },
+      { provider: "anthropic", name: "claude-opus-4-8", thinkingEffects: [] },
+      { provider: "openai-codex", name: "gpt-5.4", thinkingEffects: [] },
+    ]);
+  });
+
+  it("tolerates a bare-array data shape and non-model boot noise", () => {
+    const stdout = JSON.stringify({
+      type: "response",
+      command: "get_available_models",
+      success: true,
+      data: [{ provider: "ollama", model: { name: "llama3.3" } }],
+    });
+    expect(parseOmpModels(stdout)).toEqual([
+      { provider: "ollama", name: "llama3.3", thinkingEffects: [] },
+    ]);
+  });
+
+  it("ignores malformed lines", () => {
+    expect(parseOmpModels("not json\n{ bad json")).toEqual([]);
+  });
+});
+
+describe("parseOmpCommands", () => {
+  it("parses command rows with source groups and input hints", () => {
+    const stdout = JSON.stringify({
+      type: "response",
+      command: "get_available_commands",
+      success: true,
+      data: {
+        commands: [
+          { name: "compact", description: "Compact the conversation", source: "builtin" },
+          {
+            name: "quota",
+            description: "Show usage",
+            input: { hint: "provider" },
+            source: "builtin",
+          },
+          { name: "fix", source: "extension", description: "Run the fixer" },
+          { name: "review", source: "custom", description: "Review the diff" },
+          { name: "my-prompt", source: "file", description: "Prompt file" },
+          { name: "ungrouped", description: "No source" },
+        ],
+      },
+    });
+
+    const rows = parseOmpCommands(stdout);
+    expect(rows).toHaveLength(6);
+    expect(rows[0]).toEqual({
+      name: "compact",
+      description: "Compact the conversation",
+      hint: undefined,
+      group: "Builtin",
+    });
+    expect(rows[1]?.hint).toBe("provider");
+    expect(rows[2]?.group).toBe("Extension");
+    expect(rows[3]?.group).toBe("Custom");
+    expect(rows[4]?.group).toBe("Prompt");
+    expect(rows[5]?.group).toBeUndefined();
+  });
+
+  it("tolerates a bare-array data shape", () => {
+    const stdout = JSON.stringify({
+      type: "response",
+      command: "get_available_commands",
+      success: true,
+      data: [{ name: "compact", source: "builtin" }],
+    });
+    expect(parseOmpCommands(stdout)).toEqual([
+      { name: "compact", description: undefined, hint: undefined, group: "Builtin" },
+    ]);
+  });
+});
+
+describe("flattenOmpModels", () => {
+  it("builds slugs with first-slash semantics and thinking tier descriptors", () => {
+    const models = flattenOmpModels([
+      { provider: "opencode-go", name: "deepseek-v4-flash", thinkingEffects: ["high", "max"] },
+      { provider: "anthropic", name: "claude-opus-4-8", thinkingEffects: [] },
+    ]);
+
+    expect(models[0]?.slug).toBe("opencode-go/deepseek-v4-flash");
+    expect(models[0]?.isCustom).toBe(false);
+    expect(models[0]?.capabilities?.optionDescriptors).toEqual([
+      {
+        id: "thinkingLevel",
+        label: "Thinking",
+        type: "select",
+        options: [
+          { id: "high", label: "high" },
+          { id: "max", label: "max" },
+        ],
+      },
+    ]);
+    expect(models[1]?.capabilities?.optionDescriptors).toEqual([]);
+  });
+});
+
+describe("flattenOmpCommands", () => {
+  it("orders by group, dedupes by lowercase name, and keeps ungrouped commands", () => {
+    const commands = flattenOmpCommands([
+      { name: "fix", description: undefined, hint: undefined, group: "Extension" },
+      { name: "Compact", description: undefined, hint: undefined, group: "Builtin" },
+      { name: "compact", description: "dup", hint: undefined, group: "Builtin" },
+      { name: "review", description: undefined, hint: undefined, group: "Custom" },
+      { name: "my-prompt", description: undefined, hint: undefined, group: "Prompt" },
+      { name: "orphan", description: undefined, hint: undefined, group: undefined },
+    ]);
+
+    expect(commands.map((command) => command.name)).toEqual([
+      "Compact",
+      "fix",
+      "review",
+      "my-prompt",
+      "orphan",
+    ]);
+    expect(commands.map((command) => command.group)).toEqual([
+      "Builtin",
+      "Extension",
+      "Custom",
+      "Prompt",
+      undefined,
+    ]);
+    expect(commands[1]?.name).toBe("fix");
+  });
+
+  it("carries hints into the input contract", () => {
+    const commands = flattenOmpCommands([
+      { name: "quota", description: "Show usage", hint: "provider", group: "Builtin" },
+    ]);
+    expect(commands[0]?.input).toEqual({ hint: "provider" });
+  });
+});
+
+describe("checkOmpProviderStatus", () => {
+  it("reports ready with models from the RPC catalog", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+        }
+        expect(args).toEqual(["--mode", "rpc", "--no-session"]);
+        return makeStdoutHandle(
+          JSON.stringify({
+            type: "response",
+            command: "get_available_models",
+            success: true,
+            data: {
+              models: [
+                {
+                  provider: "opencode-go",
+                  model: { name: "deepseek-v4-flash", thinking: { effects: ["high", "max"] } },
+                },
+              ],
+            },
+          }) + "\n",
+        );
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.version).toBe(MINIMUM_OMP_VERSION);
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.message).toContain("1 model available");
+    expect(snapshot.models).toHaveLength(1);
+    expect(snapshot.models[0]?.slug).toBe("opencode-go/deepseek-v4-flash");
+  });
+
+  it("gates on the minimum version", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle("omp 17.0.8\n");
+        }
+        throw new Error("version gate must stop the probe");
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.version).toBe("17.0.8");
+    expect(snapshot.status).toBe("error");
+    expect(snapshot.message).toBe(
+      `OMP v17.0.8 is too old. Upgrade to v${MINIMUM_OMP_VERSION} or newer.`,
+    );
+  });
+
+  it("degrades to a warning when the model catalog probe fails", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+        }
+        return makeStdoutHandle("", 1);
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toContain("did not report any available models");
+    expect(snapshot.models).toHaveLength(0);
+  });
+
+  it("reports a missing binary as not installed", async () => {
+    const spawner = ChildProcessSpawner.make((command) =>
+      Effect.fail(
+        new PlatformError.PlatformError(
+          new PlatformError.SystemError({
+            _tag: "NotFound",
+            module: "test",
+            method: "spawn",
+          }),
+        ),
+      ),
+    );
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.installed).toBe(false);
+    expect(snapshot.status).toBe("error");
+    expect(snapshot.message).toContain("not installed or not on PATH");
+  });
+
+  it("skips probing entirely when disabled", async () => {
+    let spawnCount = 0;
+    const spawner = makeScriptedSpawner({
+      onArgs: () => {
+        spawnCount += 1;
+        throw new Error("disabled provider must not spawn");
+      },
+    });
+
+    const snapshot = await runProbe(spawner, decodeSettings({ enabled: false }));
+    expect(spawnCount).toBe(0);
+    expect(snapshot.status).toBe("disabled");
+    expect(snapshot.message).toContain("disabled");
+  });
+
+  it("degrades a failed command inventory to an empty list without failing the provider", async () => {
+    // The models probe runs before the commands probe; script by call order.
+    let rpcCalls = 0;
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+        }
+        rpcCalls += 1;
+        if (rpcCalls === 1) {
+          return makeStdoutHandle(
+            JSON.stringify({
+              type: "response",
+              command: "get_available_models",
+              success: true,
+              data: { models: [{ provider: "opencode-go", model: { name: "deepseek-v4-flash" } }] },
+            }) + "\n",
+          );
+        }
+        return makeStdoutHandle("", 1);
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.models).toHaveLength(1);
+    expect(snapshot.slashCommands).toEqual([]);
+    expect(snapshot.status).toBe("ready");
+  });
+
+  it("exposes the command inventory when the probe succeeds", async () => {
+    // Both RPC probes share `--mode rpc --no-session`; the models probe
+    // runs first, then the commands probe.
+    let rpcCalls = 0;
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+        }
+        rpcCalls += 1;
+        if (rpcCalls === 1) {
+          return makeStdoutHandle(
+            JSON.stringify({
+              type: "response",
+              command: "get_available_models",
+              success: true,
+              data: { models: [{ provider: "opencode-go", model: { name: "deepseek-v4-flash" } }] },
+            }) + "\n",
+          );
+        }
+        expect(args).toEqual(["--mode", "rpc", "--no-session"]);
+        return makeStdoutHandle(
+          JSON.stringify({
+            type: "response",
+            command: "get_available_commands",
+            success: true,
+            data: {
+              commands: [
+                { name: "compact", source: "builtin", description: "Compact" },
+                { name: "quota", source: "builtin", description: "Usage", input: { hint: "x" } },
+              ],
+            },
+          }) + "\n",
+        );
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.slashCommands.map((command) => command.name)).toEqual(["compact", "quota"]);
+    expect(snapshot.slashCommands[1]?.input).toEqual({ hint: "x" });
+    expect(snapshot.status).toBe("ready");
+  });
+});
