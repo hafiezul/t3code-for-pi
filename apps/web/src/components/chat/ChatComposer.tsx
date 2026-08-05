@@ -20,6 +20,7 @@ import {
 } from "@t3tools/contracts";
 import type { EnvironmentConnectionPresentation } from "@t3tools/client-runtime/connection";
 import { serializeComposerFileLink } from "@t3tools/shared/composerTrigger";
+import { providerSkillsForDisplay } from "@t3tools/shared/providerSkills";
 import { createModelSelection, normalizeModelSlug } from "@t3tools/shared/model";
 import {
   memo,
@@ -1172,25 +1173,10 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // as slash commands (get_commands), not `ServerProviderSkill` rows, so
   // synthesize entries so pi skill chips get a label and hover description
   // like Claude's do.
-  const composerSkillMetadata = useMemo(() => {
-    const providerSkills = selectedProviderStatus?.skills ?? [];
-    if (selectedProvider !== ProviderDriverKind.make("pi")) {
-      return providerSkills;
-    }
-    const piSkillCommands = (selectedProviderStatus?.slashCommands ?? [])
-      .filter((command) => command.name.startsWith("skill:"))
-      .map((command) => {
-        const name = command.name.slice("skill:".length);
-        return {
-          name,
-          path: `skill:${name}`,
-          enabled: true,
-          ...(command.description ? { description: command.description } : {}),
-          ...(command.description ? { shortDescription: command.description } : {}),
-        };
-      });
-    return [...providerSkills, ...piSkillCommands];
-  }, [selectedProvider, selectedProviderStatus?.skills, selectedProviderStatus?.slashCommands]);
+  const composerSkillMetadata = useMemo(
+    () => providerSkillsForDisplay(selectedProviderStatus),
+    [selectedProviderStatus],
+  );
 
   const composerMenuOpen = Boolean(composerTrigger);
   const composerMenuSearchKey = composerTrigger

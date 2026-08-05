@@ -184,7 +184,22 @@ function appendRun(
   return runs;
 }
 
-const SKILL_TOKEN_REGEX = /(^|\s)\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s|$)/g;
+// `$name` (Claude-style shorthand) and `/skill:name` (pi's invocation, as
+// inserted by the composer menu) both render as skill chips. The `(?=\s|$)`
+// tail keeps a trailing token at end-of-input chip-able too.
+const SKILL_TOKEN_REGEX =
+  /(^|\s)(?:\$([a-zA-Z][a-zA-Z0-9:_-]*)|(\/skill:[a-zA-Z][a-zA-Z0-9:_-]*))(?=\s|$)/g;
+
+/** Bare skill name for a token authored as `$name`, `/skill:name`, or `$skill:name`. */
+function normalizeSkillTokenName(value: string): string {
+  if (value.startsWith("/skill:")) {
+    return value.slice("/skill:".length);
+  }
+  if (value.startsWith("skill:")) {
+    return value.slice("skill:".length);
+  }
+  return value;
+}
 
 function formatSkillLabel(skill: SelectableMarkdownSkill): string {
   const displayName = skill.displayName?.trim();
@@ -218,13 +233,13 @@ function decorateSkillRuns(
     let matched = false;
     for (const match of run.text.matchAll(SKILL_TOKEN_REGEX)) {
       const prefix = match[1] ?? "";
-      const name = match[2] ?? "";
+      const name = normalizeSkillTokenName(match[2] ?? match[3] ?? "");
       const skill = skillByName.get(name);
       if (!skill) {
         continue;
       }
       const start = (match.index ?? 0) + prefix.length;
-      const end = start + name.length + 1;
+      const end = (match.index ?? 0) + match[0].length;
       if (start > cursor) {
         decorated.push({ ...run, text: run.text.slice(cursor, start) });
       }

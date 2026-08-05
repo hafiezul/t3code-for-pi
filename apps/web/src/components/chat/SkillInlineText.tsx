@@ -8,9 +8,14 @@ import {
   COMPOSER_INLINE_CHIP_ICON_CLASS_NAME,
   SKILL_CHIP_ICON_SVG,
 } from "../composerInlineChip";
+import { normalizeSkillTokenName } from "@t3tools/shared/providerSkills";
 import { cn } from "~/lib/utils";
 
-const SKILL_TOKEN_REGEX = /(^|\s)\$([a-zA-Z][a-zA-Z0-9:_-]*)(?=\s|$)/g;
+// `$name` (Claude-style shorthand) and `/skill:name` (pi's invocation, as
+// inserted by the composer menu) both render as skill chips. The `(?=\s|$)`
+// tail keeps a trailing token at end-of-input chip-able too.
+const SKILL_TOKEN_REGEX =
+  /(^|\s)(?:\$([a-zA-Z][a-zA-Z0-9:_-]*)|(\/skill:[a-zA-Z][a-zA-Z0-9:_-]*))(?=\s|$)/g;
 
 type InlineSkill = Pick<ServerProviderSkill, "name" | "displayName">;
 
@@ -20,9 +25,11 @@ export function SkillInlineText(props: { text: string; skills: ReadonlyArray<Inl
 
   for (const match of props.text.matchAll(SKILL_TOKEN_REGEX)) {
     const prefix = match[1] ?? "";
-    const name = match[2] ?? "";
+    const name = normalizeSkillTokenName(match[2] ?? match[3] ?? "");
     const start = (match.index ?? 0) + prefix.length;
-    const rawText = `$${name}`;
+    // Exact authored token (`$name` or `/skill:name`) — preserved so copying
+    // the rendered chip keeps the invocation form that was sent.
+    const rawText = props.text.slice(start, (match.index ?? 0) + match[0].length);
     const skill = props.skills.find((candidate) => candidate.name === name);
     if (!skill) {
       continue;
