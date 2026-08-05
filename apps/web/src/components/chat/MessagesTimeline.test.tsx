@@ -223,7 +223,7 @@ function buildUserTimelineEntry(text: string) {
 }
 
 describe("MessagesTimeline", () => {
-  it("renders completed reasoning collapsed and streaming reasoning expanded", () => {
+  it("renders reasoning collapsed by default, streaming or not", () => {
     const doneMarkup = renderToStaticMarkup(
       <MessagesTimeline
         {...buildProps()}
@@ -271,8 +271,8 @@ describe("MessagesTimeline", () => {
       />,
     );
     expect(streamingMarkup).toContain("Thinking…");
-    expect(streamingMarkup).toContain('aria-expanded="true"');
-    expect(streamingMarkup).toContain("hmm,");
+    expect(streamingMarkup).toContain('aria-expanded="false"');
+    expect(streamingMarkup).not.toContain("hmm,");
   });
 
   it("uses the larger leading inset only when the top fade is enabled", () => {

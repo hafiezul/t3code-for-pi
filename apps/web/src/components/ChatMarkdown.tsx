@@ -1251,6 +1251,33 @@ function areMarkdownFileLinkPropsEqual(
   );
 }
 
+/**
+ * While a message streams, delta commits arrive far faster than the browser
+ * can paint, and each one re-parses the whole markdown. Coalesce streaming
+ * text to at most one render per animation frame so parse work lands once per
+ * frame instead of once per delta. The final flush on completion is
+ * synchronous, so no trailing text is ever dropped. Non-streaming content
+ * passes through untouched.
+ */
+function useStreamingTextBuffer(text: string, isStreaming: boolean): string {
+  const [displayedText, setDisplayedText] = useState(text);
+  const latestTextRef = useRef(text);
+  latestTextRef.current = text;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      setDisplayedText(text);
+      return;
+    }
+    const frame = requestAnimationFrame(() => {
+      setDisplayedText(latestTextRef.current);
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [isStreaming, text]);
+
+  return isStreaming ? displayedText : text;
+}
+
 function ChatMarkdown({
   text,
   cwd,
@@ -1262,6 +1289,7 @@ function ChatMarkdown({
   lineBreaks = false,
 }: ChatMarkdownProps) {
   const { resolvedTheme } = useTheme();
+  const streamingText = useStreamingTextBuffer(text, isStreaming);
   const createAssetUrl = useAtomQueryRunner(assetEnvironment.createUrl, {
     reportFailure: false,
   });
@@ -1281,7 +1309,7 @@ function ChatMarkdown({
       string,
       NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
     >();
-    for (const href of extractMarkdownLinkHrefs(text)) {
+    for (const href of extractMarkdownLinkHrefs(streamingText)) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
@@ -1290,10 +1318,10 @@ function ChatMarkdown({
       }
     }
     return metaByHref;
-  }, [cwd, text]);
+  }, [cwd, streamingText]);
   const inlineCodeFileLinkMetaByText = useMemo(() => {
     const metaByText = new Map<string, MarkdownFileLinkMeta>();
-    for (const span of extractInlineCodeSpans(text)) {
+    for (const span of extractInlineCodeSpans(streamingText)) {
       if (metaByText.has(span)) continue;
       const meta = resolveInlineCodeFileLinkMeta(span, cwd);
       if (meta) {
@@ -1301,7 +1329,7 @@ function ChatMarkdown({
       }
     }
     return metaByText;
-  }, [cwd, text]);
+  }, [cwd, streamingText]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [
       ...[...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath),
@@ -1556,6 +1584,25 @@ function ChatMarkdown({
 
         const language = extractFenceLanguage(codeBlock.className);
         const fenceTitle = extractFenceTitle(extractPreCodeMeta(node));
+        // While the code is still streaming, skip syntax highlighting
+        // entirely: every delta re-highlights the whole block accumulated so
+        // far, which can stall the main thread for hundreds of milliseconds
+        // on a growing code block. The completed message renders highlighted
+        // once, through the cache in SuspenseShikiCodeBlock.
+        const highlighted = isStreaming ? (
+          <pre {...props}>{children}</pre>
+        ) : (
+          <RenderErrorBoundary fallback={<pre {...props}>{children}</pre>}>
+            <Suspense fallback={<pre {...props}>{children}</pre>}>
+              <SuspenseShikiCodeBlock
+                className={codeBlock.className}
+                code={codeBlock.code}
+                themeName={diffThemeName}
+                isStreaming={isStreaming}
+              />
+            </Suspense>
+          </RenderErrorBoundary>
+        );
         return (
           <MarkdownCodeBlock
             code={codeBlock.code}
@@ -1563,16 +1610,7 @@ function ChatMarkdown({
             fenceTitle={fenceTitle}
             theme={resolvedTheme}
           >
-            <RenderErrorBoundary fallback={<pre {...props}>{children}</pre>}>
-              <Suspense fallback={<pre {...props}>{children}</pre>}>
-                <SuspenseShikiCodeBlock
-                  className={codeBlock.className}
-                  code={codeBlock.code}
-                  themeName={diffThemeName}
-                  isStreaming={isStreaming}
-                />
-              </Suspense>
-            </RenderErrorBoundary>
+            {highlighted}
           </MarkdownCodeBlock>
         );
       },
@@ -1590,7 +1628,7 @@ function ChatMarkdown({
     openMarkdownFileInPreview,
     resolvedTheme,
     skills,
-    text,
+    streamingText,
     threadRef,
   ]);
 
@@ -1610,7 +1648,7 @@ function ChatMarkdown({
         components={markdownComponents}
         urlTransform={markdownUrlTransform}
       >
-        {text}
+        {streamingText}
       </ReactMarkdown>
     </div>
   );

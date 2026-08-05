@@ -1022,13 +1022,11 @@ function TurnFoldTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "turn-
 
 function ReasoningTimelineRow({ row }: { row: Extract<TimelineRow, { kind: "message" }> }) {
   const ctx = use(TimelineRowCtx);
-  const [expanded, setExpanded] = useState(row.message.streaming);
-  // Follow the stream lifecycle: open while thinking streams in, tuck away
-  // once the message completes so the response text reads cleanly. A manual
-  // toggle after completion survives (no further stream transitions).
-  useEffect(() => {
-    setExpanded(row.message.streaming);
-  }, [row.message.streaming]);
+  // Reasoning stays collapsed by default. Auto-expanding while the stream is
+  // live made the layout grow with every delta, and auto-collapsing when the
+  // stream finished yanked the viewport by the whole block height at once;
+  // both read as constant motion. The toggle is manual and persists.
+  const [expanded, setExpanded] = useState(false);
   const Icon = expanded ? ChevronDownIcon : ChevronRightIcon;
   const hasText = row.message.text.trim().length > 0;
   return (
