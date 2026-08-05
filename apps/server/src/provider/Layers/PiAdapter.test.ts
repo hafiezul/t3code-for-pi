@@ -891,8 +891,9 @@ describe("makePiAdapter — scripted RPC process", () => {
         });
         expect((yield* nextCommand(state)).type).toBe("prompt");
 
-        // The turn completes without any agent_settled: the adapter
-        // synthesizes it after the command response's grace window.
+        // The turn completes without any agent_settled: after the grace
+        // window the adapter probes get_state, sees isStreaming: false (a
+        // true command turn), and synthesizes completion.
         yield* Deferred.await(settled);
         const events = yield* Ref.get(collector.events);
         const types = events.map((event) => event.type);
@@ -905,7 +906,9 @@ describe("makePiAdapter — scripted RPC process", () => {
           noticeType: "info",
         });
 
-        // The synthesized completion records a turn boundary like a real one.
+        // The grace-window get_state probe fires before the synthesized
+        // completion's boundary recording.
+        expect((yield* nextCommand(state)).type).toBe("get_state");
         expect((yield* nextCommand(state)).type).toBe("get_entries");
 
         yield* adapter.stopAll();
@@ -1015,6 +1018,132 @@ describe("makePiAdapter — scripted RPC process", () => {
       const live = sessions.find((sessionEntry) => sessionEntry.threadId === threadId);
       expect(live?.status).toBe("error");
       expect(live?.lastError).toBe("Request timed out.");
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("keeps a slow agent turn open instead of synthesizing command-turn completion", () =>
+    Effect.gen(function* () {
+      // Regression: kimi-k3 took >2s to emit its first message_start, so
+      // the grace window fired, assumed an extension-command turn, and
+      // synthesized turn.completed — closing the session to "ready" while
+      // pi kept streaming for minutes. The adapter must ask pi whether the
+      // agent is still streaming before concluding it's a command turn.
+      let getStateCalls = 0;
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_steering_mode":
+          case "set_follow_up_mode":
+            return [reply(command)];
+          case "get_state": {
+            getStateCalls += 1;
+            if (getStateCalls === 1) {
+              // Startup probe: session idle.
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            }
+            // Grace-window probe (after a slow prompt): pi reports it is
+            // still streaming, then the delayed agent work streams in and
+            // the turn settles for real.
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: true,
+                },
+              }),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Hi" },
+              },
+              {
+                type: "message_end",
+                message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+              },
+              { type: "agent_settled" },
+            ];
+          }
+          case "prompt":
+            // Slow agent turn: ack arrives immediately, but no
+            // message_start / agent activity within the 2s grace window.
+            return [reply(command)];
+          case "get_entries":
+            return [reply(command, { data: { entries: [], leafId: "leaf-1" } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/pi-project",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+
+      // The grace window elapses with no agent activity. With the bug, a
+      // synthetic turn.completed fires; with the fix the adapter instead
+      // probes get_state, learns pi is still streaming, and waits. Consume
+      // that probe so the scripted agent stream + settle can flow.
+      const probe = yield* nextCommand(state);
+      expect(probe.type).toBe("get_state");
+
+      // No synthetic completion before the real settle.
+      yield* Deferred.await(settled);
+      const events = yield* Ref.get(collector.events);
+      const completions = events.filter((event) => event.type === "turn.completed");
+      expect(completions).toHaveLength(1);
+      expect(completions[0]?.payload).toMatchObject({ state: "completed" });
+      // The completion carries real streamed content (not the empty
+      // synthetic close): the assistant message item completed first.
+      const messageCompleted = events.find((event) => event.type === "item.completed");
+      expect(messageCompleted).toBeDefined();
+      const settleIndex = events.findIndex((event) => event.type === "turn.completed");
+      const messageIndex = events.findIndex((event) => event.type === "item.completed");
+      expect(messageIndex).toBeGreaterThan(-1);
+      expect(settleIndex).toBeGreaterThan(messageIndex);
+
+      // Session ends ready after the real settle.
+      const sessions = yield* adapter.listSessions();
+      const live = sessions.find((s) => s.threadId === threadId);
+      expect(live?.status).toBe("ready");
 
       yield* adapter.stopAll();
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);

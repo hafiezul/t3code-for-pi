@@ -1110,9 +1110,17 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         // empty reply and the composer would offer send instead of stop.
         const turnError = context.activeTurnError;
         context.activeTurnError = undefined;
-        if (turnError !== undefined) {
-          yield* updateSession(context, { status: "error", lastError: turnError });
-        }
+        // Reflect the turn outcome on the session: a failed turn leaves
+        // status "error" with lastError; a clean settle returns to "ready".
+        // (The projection layer also derives session status from
+        // turn.completed, but the adapter's own session view must agree.)
+        yield* updateSession(
+          context,
+          turnError !== undefined ? { status: "error", lastError: turnError } : { status: "ready" },
+          turnError !== undefined
+            ? { clearActiveTurnId: true }
+            : { clearActiveTurnId: true, clearLastError: true },
+        );
         yield* emit({
           ...(yield* buildEventBase({ threadId: context.threadId, turnId, raw: event })),
           type: "turn.completed",
@@ -1684,13 +1692,35 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         const sawAgentActivity = yield* Ref.get(context.agentActivitySincePromptRef);
         const stopped = yield* Ref.get(context.stopped);
         if (!sawAgentActivity && !stopped && context.activeTurnId === turnId) {
-          context.activeTurnId = undefined;
-          yield* emit({
-            ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
-            type: "turn.completed",
-            payload: { state: "completed" },
-          });
-          yield* Queue.offer(context.boundaryJobs, void 0);
+          // No agent activity within the window: either a true extension-command
+          // turn (pi never settles it) or a slow agent turn whose first
+          // message_start simply hasn't streamed yet (throttled model, cold
+          // upstream). Ask pi which it is before concluding — synthesizing
+          // completion for a live turn would close the session to "ready"
+          // while pi keeps working, orphaning the streamed output.
+          const stillStreaming = yield* context.client.send({ type: "get_state" }).pipe(
+            Effect.map((response) => {
+              const data = (response.data ?? {}) as Record<string, unknown>;
+              return data.isStreaming === true;
+            }),
+            // A failed probe can't prove it's a command turn — err on keeping
+            // the turn open (agent_settled or the exit watcher will close it).
+            Effect.catch((cause) =>
+              Effect.logWarning("Pi get_state probe failed during command-turn grace window", {
+                detail: cause.detail,
+              }).pipe(Effect.as(true)),
+            ),
+          );
+          if (!stillStreaming && context.activeTurnId === turnId) {
+            context.activeTurnId = undefined;
+            context.activeTurnError = undefined;
+            yield* emit({
+              ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+              type: "turn.completed",
+              payload: { state: "completed" },
+            });
+            yield* Queue.offer(context.boundaryJobs, void 0);
+          }
         }
       }
 
