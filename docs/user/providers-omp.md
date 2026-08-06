@@ -89,6 +89,20 @@ When the agent needs your input, it can use OMP's Ask tool: the question opens i
 question prompt with the agent's suggested options (or a free-text answer), and the turn
 continues once you answer. Interrupting the turn cancels the question instead.
 
+## Prompt Actions
+
+With an OMP provider active, typing `#` in the message box opens the prompt-action menu, just
+like the OMP TUI. Pick an action to run it on your draft — the `#` token is removed and the draft
+is otherwise left as it is:
+
+- **Copy whole prompt** — copies the full draft to your clipboard.
+- **Copy current line** — copies the line the cursor is on.
+- **Undo** — undoes the last edit.
+
+Keep typing after `#` to narrow the list (for example, `#cop`). The menu only appears when there
+is no space between `#` and the cursor, so markdown headings like `# Title` are unaffected. Other
+providers keep `#` as plain text.
+
 ## Permissions
 
 OMP's tool-approval prompts map onto T3 Code's approval flow:

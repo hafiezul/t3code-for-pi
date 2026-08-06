@@ -36,10 +36,13 @@ import {
 import { createPortal } from "react-dom";
 import {
   clampCollapsedComposerCursor,
+  type ComposerPromptActionDefinition,
   type ComposerTrigger,
   collapseExpandedComposerCursor,
+  composerLineAtCursor,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
+  filterComposerPromptActions,
   replaceTextRange,
   shouldSubmitComposerOnEnter,
 } from "../../composer-logic";
@@ -107,6 +110,7 @@ import { ContextWindowMeter } from "./ContextWindowMeter";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { basenameOfPath } from "../../pierre-icons";
 import { cn, randomUUID } from "~/lib/utils";
+import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { Separator } from "../ui/separator";
 
 function ComposerCommandMenuLayer(props: { anchor: HTMLElement | null; children: ReactNode }) {
@@ -252,6 +256,32 @@ const extendReplacementRangeForTrailingSpace = (
   }
   return text[rangeEnd] === " " ? rangeEnd + 1 : rangeEnd;
 };
+
+/**
+ * Prompt actions for the `#` picker, mirroring the OMP TUI's menu for the
+ * web-meaningful subset (OMP also offers four cursor moves that are native
+ * no-ops in a mouse-driven web editor). See docs/adr/0001.
+ */
+const COMPOSER_PROMPT_ACTIONS: ReadonlyArray<ComposerPromptActionDefinition> = [
+  {
+    id: "copy-prompt",
+    label: "Copy whole prompt",
+    description: "Copy the full draft to the clipboard",
+    keywords: ["copy", "prompt", "clipboard", "message"],
+  },
+  {
+    id: "copy-line",
+    label: "Copy current line",
+    description: "Copy the line the cursor is on",
+    keywords: ["copy", "line", "clipboard", "current"],
+  },
+  {
+    id: "undo",
+    label: "Undo",
+    description: "Undo the last edit",
+    keywords: ["undo", "revert", "edit", "history"],
+  },
+];
 
 const syncTerminalContextsByIds = (
   contexts: ReadonlyArray<TerminalContextDraft>,
@@ -1087,8 +1117,18 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   // ------------------------------------------------------------------
   // Derived: composer trigger / menu
   // ------------------------------------------------------------------
-  const composerTriggerKind = composerTrigger?.kind ?? null;
-  const pathTriggerQuery = composerTrigger?.kind === "path" ? composerTrigger.query : "";
+  // The `#` prompt-action picker mirrors the OMP TUI, so it is OMP-only:
+  // other providers keep `#` as free text (docs/adr/0001).
+  const effectiveComposerTrigger = useMemo(() => {
+    if (composerTrigger?.kind === "prompt-action" && selectedProviderStatus?.driver !== "omp") {
+      return null;
+    }
+    return composerTrigger;
+  }, [composerTrigger, selectedProviderStatus?.driver]);
+
+  const composerTriggerKind = effectiveComposerTrigger?.kind ?? null;
+  const pathTriggerQuery =
+    effectiveComposerTrigger?.kind === "path" ? effectiveComposerTrigger.query : "";
   const isPathTrigger = composerTriggerKind === "path";
   const workspaceEntries = useComposerPathSearch({
     environmentId,
@@ -1097,8 +1137,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
   });
 
   const composerMenuItems = useMemo<ComposerCommandItem[]>(() => {
-    if (!composerTrigger) return [];
-    if (composerTrigger.kind === "path") {
+    if (!effectiveComposerTrigger) return [];
+    if (effectiveComposerTrigger.kind === "path") {
       return workspaceEntries.entries.map((entry) => ({
         id: `path:${entry.kind}:${entry.path}`,
         type: "path",
@@ -1108,7 +1148,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         description: entry.path.slice(0, Math.max(0, entry.path.lastIndexOf("/"))),
       }));
     }
-    if (composerTrigger.kind === "slash-command") {
+    if (effectiveComposerTrigger.kind === "slash-command") {
       const builtInSlashCommandItems = [
         {
           id: "slash:model",
@@ -1144,30 +1184,48 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
           description: command.description ?? command.input?.hint ?? "Run provider command",
         }),
       );
-      const query = composerTrigger.query.trim().toLowerCase();
+      const query = effectiveComposerTrigger.query.trim().toLowerCase();
       const slashCommandItems = [...builtInSlashCommandItems, ...providerSlashCommandItems];
       if (!query) {
         return slashCommandItems;
       }
       return searchSlashCommandItems(slashCommandItems, query);
     }
-    if (composerTrigger.kind === "skill") {
-      return searchProviderSkills(selectedProviderStatus?.skills ?? [], composerTrigger.query).map(
-        (skill) => ({
-          id: `skill:${selectedProvider}:${skill.name}`,
-          type: "skill" as const,
-          provider: selectedProvider,
-          skill,
-          label: formatProviderSkillDisplayName(skill),
-          description:
-            skill.shortDescription ??
-            skill.description ??
-            (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
-        }),
-      );
+    if (effectiveComposerTrigger.kind === "skill") {
+      return searchProviderSkills(
+        selectedProviderStatus?.skills ?? [],
+        effectiveComposerTrigger.query,
+      ).map((skill) => ({
+        id: `skill:${selectedProvider}:${skill.name}`,
+        type: "skill" as const,
+        provider: selectedProvider,
+        skill,
+        label: formatProviderSkillDisplayName(skill),
+        description:
+          skill.shortDescription ??
+          skill.description ??
+          (skill.scope ? `${skill.scope} skill` : "Run provider skill"),
+      }));
+    }
+    if (effectiveComposerTrigger.kind === "prompt-action") {
+      return filterComposerPromptActions(
+        COMPOSER_PROMPT_ACTIONS,
+        effectiveComposerTrigger.query,
+      ).map((action) => ({
+        id: `prompt-action:${action.id}`,
+        type: "prompt-action" as const,
+        actionId: action.id,
+        label: action.label,
+        description: action.description,
+      }));
     }
     return [];
-  }, [composerTrigger, selectedProvider, selectedProviderStatus, workspaceEntries.entries]);
+  }, [
+    effectiveComposerTrigger,
+    selectedProvider,
+    selectedProviderStatus,
+    workspaceEntries.entries,
+  ]);
 
   // Chip metadata for the editor's skill tokens. pi's probe reports skills
   // as slash commands (get_commands), not `ServerProviderSkill` rows, so
@@ -1178,9 +1236,9 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     [selectedProviderStatus],
   );
 
-  const composerMenuOpen = Boolean(composerTrigger);
-  const composerMenuSearchKey = composerTrigger
-    ? `${composerTrigger.kind}:${composerTrigger.query.trim().toLowerCase()}`
+  const composerMenuOpen = Boolean(effectiveComposerTrigger);
+  const composerMenuSearchKey = effectiveComposerTrigger
+    ? `${effectiveComposerTrigger.kind}:${effectiveComposerTrigger.query.trim().toLowerCase()}`
     : null;
   const activeComposerMenuItem = useMemo(() => {
     const activeItemId = resolveComposerMenuActiveItemId({
@@ -1738,11 +1796,12 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     trigger: ComposerTrigger | null;
   } => {
     const snapshot = readComposerSnapshot();
-    return {
-      snapshot,
-      trigger: detectComposerTrigger(snapshot.value, snapshot.expandedCursor),
-    };
-  }, [readComposerSnapshot]);
+    let trigger = detectComposerTrigger(snapshot.value, snapshot.expandedCursor);
+    if (trigger?.kind === "prompt-action" && selectedProviderStatus?.driver !== "omp") {
+      trigger = null;
+    }
+    return { snapshot, trigger };
+  }, [readComposerSnapshot, selectedProviderStatus?.driver]);
 
   const onSelectComposerItem = useCallback(
     (item: ComposerCommandItem) => {
@@ -1826,6 +1885,51 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
         if (applied) {
           setComposerHighlightedItemId(null);
         }
+        return;
+      }
+      if (item.type === "prompt-action") {
+        // OMP semantics: strip the `#` token from the draft, then execute the
+        // action. Stripping first also splits Lexical's history merge, so the
+        // native undo that follows pops only the trigger typing — verified in
+        // the browser pass (undo without the strip reverts the whole draft).
+        const applied = applyPromptReplacement(trigger.rangeStart, trigger.rangeEnd, "", {
+          expectedText: snapshot.value.slice(trigger.rangeStart, trigger.rangeEnd),
+        });
+        if (!applied) {
+          return;
+        }
+        if (item.actionId === "undo") {
+          setComposerHighlightedItemId(null);
+          composerEditorRef.current?.undo();
+          return;
+        }
+        const strippedValue = `${snapshot.value.slice(0, trigger.rangeStart)}${snapshot.value.slice(trigger.rangeEnd)}`;
+        // After stripping, the caret sits where the `#` token was.
+        const textToCopy =
+          item.actionId === "copy-line"
+            ? composerLineAtCursor(strippedValue, trigger.rangeStart)
+            : strippedValue;
+        if (!textToCopy) {
+          toastManager.add({ type: "error", title: "Nothing to copy." });
+          return;
+        }
+        const copyTarget = item.actionId === "copy-line" ? "current line" : "prompt";
+        void writeTextToClipboard(textToCopy, copyTarget)
+          .then((copied) => {
+            setComposerHighlightedItemId(null);
+            if (copied) {
+              toastManager.add({
+                type: "info",
+                title:
+                  item.actionId === "copy-line"
+                    ? "Line copied to clipboard."
+                    : "Prompt copied to clipboard.",
+              });
+            }
+          })
+          .catch(() => {
+            toastManager.add({ type: "error", title: "Copy failed." });
+          });
         return;
       }
     },
@@ -2981,8 +3085,8 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
                   isLoading={isComposerMenuLoading}
                   triggerKind={composerTriggerKind}
                   groupSlashCommandSections={
-                    composerTrigger?.kind === "slash-command" &&
-                    composerTrigger.query.trim().length === 0
+                    effectiveComposerTrigger?.kind === "slash-command" &&
+                    effectiveComposerTrigger.query.trim().length === 0
                   }
                   emptyStateText={composerMenuEmptyState}
                   activeItemId={activeComposerMenuItem?.id ?? null}

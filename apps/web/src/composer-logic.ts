@@ -1,7 +1,7 @@
 import { splitPromptIntoComposerSegments } from "./composer-editor-mentions";
 import { INLINE_TERMINAL_CONTEXT_PLACEHOLDER } from "./lib/terminalContext";
 
-export type ComposerTriggerKind = "path" | "slash-command" | "skill";
+export type ComposerTriggerKind = "path" | "slash-command" | "skill" | "prompt-action";
 export type ComposerSlashCommand = "model" | "plan" | "default";
 
 export interface ComposerTrigger {
@@ -240,6 +240,22 @@ export function detectComposerTrigger(text: string, cursorInput: number): Compos
     }
   }
 
+  // Prompt-action grammar mirrors the OMP TUI: the last `#` before the caret
+  // opens the picker unless whitespace follows it (so markdown headings and
+  // `# Title` stay free text). Fires mid-word like OMP (`foo#copy`).
+  const hashIndex = linePrefix.lastIndexOf("#");
+  if (hashIndex >= 0) {
+    const query = linePrefix.slice(hashIndex + 1);
+    if (!query.split("").some(isWhitespace)) {
+      return {
+        kind: "prompt-action",
+        query,
+        rangeStart: lineStart + hashIndex,
+        rangeEnd: cursor,
+      };
+    }
+  }
+
   const tokenStart = tokenStartForCursor(text, cursor);
   const token = text.slice(tokenStart, cursor);
   if (token.startsWith("$")) {
@@ -284,4 +300,68 @@ export function replaceTextRange(
   const safeEnd = Math.max(safeStart, Math.min(text.length, rangeEnd));
   const nextText = `${text.slice(0, safeStart)}${replacement}${text.slice(safeEnd)}`;
   return { text: nextText, cursor: safeStart + replacement.length };
+}
+
+export interface ComposerPromptActionDefinition {
+  id: string;
+  label: string;
+  description: string;
+  keywords: ReadonlyArray<string>;
+}
+
+/**
+ * Subsequence fuzzy score mirroring the OMP TUI prompt-action picker:
+ * exact 100, prefix 80, substring 60, scattered subsequence `40 - gaps * 5`.
+ */
+function promptActionFuzzyScore(query: string, target: string): number {
+  if (target === query) return 100;
+  if (target.startsWith(query)) return 80;
+  if (target.includes(query)) return 60;
+
+  let queryIndex = 0;
+  let gaps = 0;
+  let lastMatchIndex = -1;
+  for (
+    let targetIndex = 0;
+    targetIndex < target.length && queryIndex < query.length;
+    targetIndex += 1
+  ) {
+    if (query[queryIndex] === target[targetIndex]) {
+      if (lastMatchIndex >= 0 && targetIndex - lastMatchIndex > 1) {
+        gaps += 1;
+      }
+      lastMatchIndex = targetIndex;
+      queryIndex += 1;
+    }
+  }
+
+  if (queryIndex !== query.length) return 0;
+  return Math.max(1, 40 - gaps * 5);
+}
+
+export function filterComposerPromptActions(
+  actions: ReadonlyArray<ComposerPromptActionDefinition>,
+  query: string,
+): ComposerPromptActionDefinition[] {
+  const normalized = query.trim().toLowerCase();
+  if (!normalized) {
+    return [...actions];
+  }
+  const scored = actions
+    .map((action) => ({
+      action,
+      score: promptActionFuzzyScore(
+        normalized,
+        [action.label, action.description, ...action.keywords].join(" ").toLowerCase(),
+      ),
+    }))
+    .filter((entry) => entry.score > 0);
+  return scored.sort((a, b) => b.score - a.score).map((entry) => entry.action);
+}
+
+export function composerLineAtCursor(text: string, cursorInput: number): string {
+  const cursor = clampCursor(text, cursorInput);
+  const lineStart = text.lastIndexOf("\n", Math.max(0, cursor - 1)) + 1;
+  const lineEnd = text.indexOf("\n", cursor);
+  return text.slice(lineStart, lineEnd === -1 ? text.length : lineEnd);
 }

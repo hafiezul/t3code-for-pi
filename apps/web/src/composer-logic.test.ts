@@ -3,8 +3,10 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   clampCollapsedComposerCursor,
   collapseExpandedComposerCursor,
+  composerLineAtCursor,
   detectComposerTrigger,
   expandCollapsedComposerCursor,
+  filterComposerPromptActions,
   isCollapsedCursorAdjacentToInlineToken,
   parseStandaloneComposerSlashCommand,
   replaceTextRange,
@@ -370,5 +372,125 @@ describe("parseStandaloneComposerSlashCommand", () => {
 
   it("ignores slash commands with extra message text", () => {
     expect(parseStandaloneComposerSlashCommand("/plan explain this")).toBeNull();
+  });
+});
+
+describe("detectComposerTrigger (# prompt actions)", () => {
+  it("detects a bare # trigger with an empty query", () => {
+    const trigger = detectComposerTrigger("#", 1);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "", rangeStart: 0, rangeEnd: 1 });
+  });
+
+  it("detects a # prompt-action query at line start", () => {
+    const trigger = detectComposerTrigger("#cop", 4);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 0, rangeEnd: 4 });
+  });
+
+  it("detects a # prompt-action query mid-line", () => {
+    const trigger = detectComposerTrigger("fix #cop", 8);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 4, rangeEnd: 8 });
+  });
+
+  it("treats whitespace after # as plain text (markdown headings)", () => {
+    expect(detectComposerTrigger("# Title", 7)).toBeNull();
+    expect(detectComposerTrigger("see # Title", 11)).toBeNull();
+  });
+
+  it("uses the last # before the caret (OMP grammar)", () => {
+    const trigger = detectComposerTrigger("a#b#cop", 7);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 3, rangeEnd: 7 });
+  });
+
+  it("fires mid-word like the OMP TUI", () => {
+    const trigger = detectComposerTrigger("foo#cop", 7);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 3, rangeEnd: 7 });
+  });
+
+  it("only considers the current line", () => {
+    const trigger = detectComposerTrigger("before#cop\nthen", 15);
+    expect(trigger).toBeNull();
+  });
+
+  it("prefers prompt actions over @ and $ tokens after the hash", () => {
+    const trigger = detectComposerTrigger("use @src#cop", 12);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 8, rangeEnd: 12 });
+  });
+
+  it("keeps slash commands at line start winning over #", () => {
+    const trigger = detectComposerTrigger("/#cop", 5);
+    expect(trigger?.kind).toBe("slash-command");
+  });
+});
+
+const PROMPT_ACTIONS_FIXTURE = [
+  {
+    id: "copy-prompt",
+    label: "Copy whole prompt",
+    description: "Copy the full draft",
+    keywords: ["copy", "prompt", "clipboard", "message"],
+  },
+  {
+    id: "copy-line",
+    label: "Copy current line",
+    description: "Copy the line under the cursor",
+    keywords: ["copy", "line", "clipboard", "current"],
+  },
+  {
+    id: "undo",
+    label: "Undo",
+    description: "Undo the last edit",
+    keywords: ["undo", "revert", "edit", "history"],
+  },
+];
+
+describe("filterComposerPromptActions", () => {
+  it("returns all actions in registry order for an empty query", () => {
+    expect(filterComposerPromptActions(PROMPT_ACTIONS_FIXTURE, "").map((a) => a.id)).toEqual([
+      "copy-prompt",
+      "copy-line",
+      "undo",
+    ]);
+  });
+
+  it("scores prefix matches above scattered matches", () => {
+    const ids = filterComposerPromptActions(PROMPT_ACTIONS_FIXTURE, "cop").map((a) => a.id);
+    expect(ids[0]).toBe("copy-prompt");
+    expect(ids).toContain("copy-line");
+  });
+
+  it("matches action keywords", () => {
+    const ids = filterComposerPromptActions(PROMPT_ACTIONS_FIXTURE, "clipboard").map((a) => a.id);
+    expect(ids).toEqual(["copy-prompt", "copy-line"]);
+  });
+
+  it("filters by scattered subsequence with OMP scoring", () => {
+    const ids = filterComposerPromptActions(PROMPT_ACTIONS_FIXTURE, "cpl").map((a) => a.id);
+    expect(ids).toEqual(["copy-prompt", "copy-line"]);
+  });
+
+  it("returns nothing for a non-matching query", () => {
+    expect(filterComposerPromptActions(PROMPT_ACTIONS_FIXTURE, "zzz")).toEqual([]);
+  });
+});
+
+describe("composerLineAtCursor", () => {
+  it("returns the whole single-line draft", () => {
+    expect(composerLineAtCursor("fix the bug", 5)).toBe("fix the bug");
+  });
+
+  it("returns the line containing the cursor", () => {
+    expect(composerLineAtCursor("one\ntwo three\nfour", 6)).toBe("two three");
+  });
+
+  it("clamps an out-of-range cursor", () => {
+    expect(composerLineAtCursor("one\ntwo", 100)).toBe("two");
+  });
+
+  it("returns an empty last line for a trailing newline at the end", () => {
+    expect(composerLineAtCursor("one\n", 4)).toBe("");
+  });
+
+  it("returns the first line for cursor at 0", () => {
+    expect(composerLineAtCursor("one\ntwo", 0)).toBe("one");
   });
 });

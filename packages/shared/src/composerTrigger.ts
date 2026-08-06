@@ -1,4 +1,9 @@
-export type ComposerTriggerKind = "path" | "slash-command" | "slash-model" | "skill";
+export type ComposerTriggerKind =
+  | "path"
+  | "slash-command"
+  | "slash-model"
+  | "skill"
+  | "prompt-action";
 export type ComposerSlashCommand = "model" | "plan" | "default";
 
 export interface ComposerTrigger {
@@ -97,6 +102,23 @@ export function detectComposerTrigger(
   }
 
   const wsCheck = isWhitespaceChar ?? isWhitespace;
+
+  // Prompt-action grammar mirrors the OMP TUI: the last `#` before the caret
+  // opens the picker unless whitespace follows it (so markdown headings and
+  // `# Title` stay free text). Fires mid-word like OMP (`foo#copy`).
+  const hashIndex = linePrefix.lastIndexOf("#");
+  if (hashIndex >= 0) {
+    const query = linePrefix.slice(hashIndex + 1);
+    if (!query.split("").some(wsCheck)) {
+      return {
+        kind: "prompt-action",
+        query,
+        rangeStart: lineStart + hashIndex,
+        rangeEnd: cursor,
+      };
+    }
+  }
+
   let tokenIdx = cursor - 1;
   while (tokenIdx >= 0 && !wsCheck(text[tokenIdx] ?? "")) {
     tokenIdx -= 1;

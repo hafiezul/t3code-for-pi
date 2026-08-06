@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { serializeComposerFileLink, serializeComposerMentionPath } from "./composerTrigger.ts";
+import {
+  detectComposerTrigger,
+  serializeComposerFileLink,
+  serializeComposerMentionPath,
+} from "./composerTrigger.ts";
 
 describe("serializeComposerMentionPath", () => {
   it("keeps simple mention paths unquoted", () => {
@@ -39,5 +43,30 @@ describe("serializeComposerFileLink", () => {
     expect(serializeComposerFileLink("@scope/package.json")).toBe(
       "[package.json](@scope/package.json)",
     );
+  });
+});
+
+describe("detectComposerTrigger (# prompt actions)", () => {
+  it("detects a # prompt-action query at line start", () => {
+    const trigger = detectComposerTrigger("#cop", 4);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 0, rangeEnd: 4 });
+  });
+
+  it("treats whitespace after # as plain text (markdown headings)", () => {
+    expect(detectComposerTrigger("# Title", 7)).toBeNull();
+  });
+
+  it("fires mid-word like the OMP TUI", () => {
+    const trigger = detectComposerTrigger("foo#cop", 7);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 3, rangeEnd: 7 });
+  });
+
+  it("uses the last # before the caret", () => {
+    const trigger = detectComposerTrigger("a#b#cop", 7);
+    expect(trigger).toEqual({ kind: "prompt-action", query: "cop", rangeStart: 3, rangeEnd: 7 });
+  });
+
+  it("only considers the current line", () => {
+    expect(detectComposerTrigger("before#cop\nthen", 15)).toBeNull();
   });
 });

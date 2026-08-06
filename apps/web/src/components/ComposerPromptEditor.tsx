@@ -34,6 +34,7 @@ import {
   FOCUS_COMMAND,
   $getRoot,
   HISTORY_MERGE_TAG,
+  UNDO_COMMAND,
   DecoratorNode,
   type ElementNode,
   type LexicalNode,
@@ -882,6 +883,7 @@ export interface ComposerPromptEditorHandle {
   focus: () => void;
   focusAt: (cursor: number) => void;
   focusAtEnd: () => void;
+  undo: () => void;
   readSnapshot: () => {
     value: string;
     cursor: number;
@@ -1704,6 +1706,9 @@ function ComposerPromptEditorInner({
             snapshotRef.current.value.length,
           ),
         );
+      },
+      undo: () => {
+        editor.dispatchCommand(UNDO_COMMAND, undefined);
       },
       readSnapshot,
     }),
