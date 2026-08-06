@@ -2066,6 +2066,315 @@ describe("makeOmpAdapter — scripted RPC process", () => {
     }),
   );
 
+  it.effect("fails loudly when a session_before_branch extension vetoes the branch", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_end",
+                message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+              },
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [
+              reply(command, {
+                data: { entries: [{ entryId: "u1", text: "hi" }] },
+              }),
+            ];
+          case "branch":
+            // session_before_branch extension veto (checkpoint-restore doc,
+            // decision 1): OMP reports it as cancelled: true.
+            return [reply(command, { data: { cancelled: true } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) =>
+          event.type === "turn.completed" || event.type === "session.exited"
+            ? "settled"
+            : undefined,
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+      expect((yield* nextCommand(state)).type).toBe("set_subagent_subscription");
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settled);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      // Guard state read, then the vetoed branch — nothing after it.
+      const outcome = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.exit);
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+      const branchCommand = yield* nextCommand(state);
+      expect(branchCommand.type).toBe("branch");
+      expect(branchCommand.entryId).toBe("u1");
+
+      expect(outcome._tag).toBe("Failure");
+      const failure = Option.getOrUndefined(
+        Option.flatMap(Exit.getCause(outcome), (cause) => Cause.findErrorOption(cause)),
+      );
+      expect(failure).toBeInstanceOf(ProviderAdapterRequestError);
+
+      // The veto changed nothing: cursor still points at the original file
+      // and the boundary list is intact.
+      const sessions = yield* adapter.listSessions();
+      const live = sessions.find((sessionEntry) => sessionEntry.threadId === threadId);
+      expect(live?.resumeCursor).toMatchObject({
+        schemaVersion: 1,
+        sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+        sessionId: "thread-1",
+      });
+      expect((live?.resumeCursor as OmpResumeCursorType | undefined)?.turnBoundaries).toEqual([
+        "u1",
+      ]);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("warns and no-ops when no boundary maps to the requested rewind", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            // A branch attempt would surface here and fail the test.
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const warning = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { warning },
+        matches: (event) => (event.type === "runtime.warning" ? "warning" : undefined),
+      });
+
+      // Fresh session: no turns, so no recorded boundary (a pre-feature
+      // session resumes the same way — turnBoundaries absent).
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+      expect((yield* nextCommand(state)).type).toBe("set_subagent_subscription");
+
+      const outcome = yield* adapter.rollbackThread(threadId, 1).pipe(Effect.exit);
+      expect(outcome._tag).toBe("Success");
+
+      yield* Deferred.await(warning);
+      const events = yield* Ref.get(collector.events);
+      const warnings = events.filter(
+        (event): event is Extract<ProviderRuntimeEvent, { type: "runtime.warning" }> =>
+          event.type === "runtime.warning",
+      );
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]?.payload.message).toContain("not rewound");
+
+      // No branch was attempted; the session is untouched.
+      const sessions = yield* adapter.listSessions();
+      const live = sessions.find((sessionEntry) => sessionEntry.threadId === threadId);
+      expect(live?.resumeCursor).toMatchObject({
+        schemaVersion: 1,
+        sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+        sessionId: "thread-1",
+      });
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("branches at the kept-count boundary and truncates the list to the kept turns", () =>
+    Effect.gen(function* () {
+      let getStateCalls = 0;
+      let branchMessageCalls = 0;
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state": {
+            getStateCalls += 1;
+            return [
+              reply(command, {
+                data:
+                  // Calls 1 (startSession) and 2 (rollback streaming guard)
+                  // report the ORIGINAL file — only the post-branch read
+                  // (call 3) reports the fork, proving the cursor rebind
+                  // comes from that read, not the guard.
+                  getStateCalls <= 2
+                    ? {
+                        sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                        sessionId: "thread-1",
+                        isStreaming: false,
+                      }
+                    : {
+                        sessionFile: "/tmp/t3/omp/sessions/x/forked-123.jsonl",
+                        sessionId: "forked-123",
+                        isStreaming: false,
+                      },
+              }),
+            ];
+          }
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_end",
+                message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+              },
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages": {
+            branchMessageCalls += 1;
+            return [
+              reply(command, {
+                data: {
+                  entries:
+                    branchMessageCalls === 1
+                      ? [{ entryId: "u1", text: "hi" }]
+                      : [
+                          { entryId: "u1", text: "hi" },
+                          { entryId: "u2", text: "hi again" },
+                        ],
+                },
+              }),
+            ];
+          }
+          case "branch":
+            return [reply(command, { data: { cancelled: false } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+      expect((yield* nextCommand(state)).type).toBe("set_subagent_subscription");
+
+      // Turn 1 settles → boundary ["u1"]; turn 2 settles → ["u1", "u2"].
+      yield* adapter.sendTurn({
+        threadId,
+        input: "first",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages"); // boundary u1
+      yield* adapter.sendTurn({
+        threadId,
+        input: "second",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages"); // boundary u2
+
+      // Roll back one turn: keptCount = 2 − 1, branch at boundaries[1] = u2.
+      yield* adapter.rollbackThread(threadId, 1);
+      expect((yield* nextCommand(state)).type).toBe("get_state"); // streaming guard
+      const branchCommand = yield* nextCommand(state);
+      expect(branchCommand.type).toBe("branch");
+      expect(branchCommand.entryId).toBe("u2");
+      expect((yield* nextCommand(state)).type).toBe("get_state"); // post-branch rebind
+      const resubscribe = yield* nextCommand(state);
+      expect(resubscribe.type).toBe("set_subagent_subscription");
+
+      // Cursor rebound to the forked file; the boundary list truncated to
+      // the single kept turn.
+      const sessions = yield* adapter.listSessions();
+      const live = sessions.find((sessionEntry) => sessionEntry.threadId === threadId);
+      expect(live?.resumeCursor).toMatchObject({
+        schemaVersion: 1,
+        sessionFile: "/tmp/t3/omp/sessions/x/forked-123.jsonl",
+        sessionId: "forked-123",
+      });
+      expect((live?.resumeCursor as OmpResumeCursorType | undefined)?.turnBoundaries).toEqual([
+        "u1",
+      ]);
+
+      yield* adapter.stopAll();
+    }),
+  );
+
   it.effect("completes command turns that never enter the agent loop", () =>
     Effect.gen(function* () {
       const state = yield* makeScriptedState((command) => {
