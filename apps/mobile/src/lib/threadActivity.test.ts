@@ -182,6 +182,84 @@ describe("buildThreadFeed", () => {
     );
   });
 
+  it("renders subagent rows with the subagent icon and completion tones", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-subagents"),
+      projectId: ProjectId.make("project-1"),
+      title: "Subagent swarm",
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:05.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("subagent:sa-1"),
+          kind: "subagent.started",
+          summary: "Subagent started",
+          createdAt: "2026-04-01T00:00:01.000Z",
+          turnId: TurnId.make("turn-1"),
+          payload: { taskId: "subagent:sa-1", taskType: "subagent", detail: "tester" },
+        }),
+        makeActivity({
+          id: EventId.make("subagent:sa-1"),
+          kind: "subagent.progress",
+          summary: "Subagent working",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId: TurnId.make("turn-1"),
+          payload: {
+            taskId: "subagent:sa-1",
+            taskType: "subagent",
+            title: "running step 2",
+            summary: "parsing config",
+          },
+        }),
+        makeActivity({
+          id: EventId.make("subagent:sa-fail"),
+          kind: "subagent.completed",
+          summary: "Subagent failed",
+          tone: "error",
+          createdAt: "2026-04-01T00:00:03.000Z",
+          turnId: TurnId.make("turn-1"),
+          payload: {
+            taskId: "subagent:sa-fail",
+            taskType: "subagent",
+            status: "failed",
+            summary: "hit an upstream timeout",
+            detail: "hit an upstream timeout",
+          },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const group = feed[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+
+    expect(group.activities.map((activity) => activity.icon)).toEqual([
+      "subagent",
+      "subagent",
+      "subagent",
+    ]);
+    expect(group.activities.map((activity) => activity.summary)).toEqual([
+      "Subagent started",
+      "Running step 2",
+      "Hit an upstream timeout",
+    ]);
+    // Progress rows are live (thinking); failed completion is a failure row.
+    expect(group.activities.map((activity) => activity.status)).toEqual([
+      null,
+      "neutral",
+      "failure",
+    ]);
+  });
+
   it("keeps MCP inputs available to expanded mobile work rows", () => {
     const turnId = TurnId.make("turn-mcp");
     const thread = makeThread({

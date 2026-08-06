@@ -1182,10 +1182,16 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       };
       // An approval or user-input request is blocked-on-you work — it must
-      // never stay hidden inside a settled slim row.
+      // never stay hidden inside a settled slim row. Subagent rows can also
+      // report after their turn ended (detached subagents outliving the
+      // settle) — their frames ride the same wake so the live row is not
+      // buried inside a settled slim row.
       const wakesSettledThread =
         command.activity.kind === "approval.requested" ||
-        command.activity.kind === "user-input.requested";
+        command.activity.kind === "user-input.requested" ||
+        command.activity.kind === "subagent.started" ||
+        command.activity.kind === "subagent.progress" ||
+        command.activity.kind === "subagent.completed";
       // Real activity resets ANY override (settled wakes, active unpins).
       if (thread.settledOverride === null || !wakesSettledThread) {
         return activityAppendedEvent;

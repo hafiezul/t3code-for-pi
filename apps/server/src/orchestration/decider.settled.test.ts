@@ -520,6 +520,36 @@ it.layer(NodeServices.layer)("settled thread decider", (it) => {
     }),
   );
 
+  it.effect("unsettles for subagent rows so detached reporting surfaces", () =>
+    Effect.gen(function* () {
+      for (const kind of ["subagent.started", "subagent.progress", "subagent.completed"] as const) {
+        const result = yield* decideOrchestrationCommand({
+          command: {
+            type: "thread.activity.append",
+            commandId: CommandId.make(`cmd-activity-${kind}`),
+            threadId: ThreadId.make("thread-1"),
+            activity: {
+              id: EventId.make(`activity-${kind}`),
+              tone: "info",
+              kind,
+              summary: kind,
+              payload: null,
+              turnId: null,
+              createdAt: NOW,
+            },
+            createdAt: NOW,
+          },
+          readModel: makeReadModel("settled"),
+        });
+        const events = Array.isArray(result) ? result : [result];
+        expect(events.map((event) => event.type)).toEqual([
+          "thread.unsettled",
+          "thread.activity-appended",
+        ]);
+      }
+    }),
+  );
+
   it("decides thread.status.updated for a set and a clear", () =>
     Effect.gen(function* () {
       const setResult = yield* decideOrchestrationCommand({

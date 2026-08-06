@@ -1892,6 +1892,20 @@ describe("makeOmpAdapter — scripted RPC process", () => {
                 recentOutput: `${"file contents ".repeat(500)}` + "tail",
               },
               { type: "subagent_lifecycle", id: "sa-1", state: "completed", description: "done" },
+              { type: "subagent_lifecycle", id: "sa-2", state: "started", name: "runner" },
+              {
+                type: "subagent_lifecycle",
+                id: "sa-2",
+                state: "failed",
+                description: "hit an upstream timeout",
+              },
+              { type: "subagent_lifecycle", id: "sa-3", state: "started", name: "helper" },
+              {
+                type: "subagent_lifecycle",
+                id: "sa-3",
+                state: "aborted",
+                description: "cancelled",
+              },
             ];
           case "get_branch_messages":
             return [
@@ -1912,10 +1926,21 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       );
 
       const completed = yield* Deferred.make<undefined>();
+      const failed = yield* Deferred.make<undefined>();
+      const aborted = yield* Deferred.make<undefined>();
       const collector = yield* collectEventsUntil({
         stream: adapter.streamEvents,
-        signals: { completed },
-        matches: (event) => (event.type === "task.completed" ? "completed" : undefined),
+        signals: { completed, failed, aborted },
+        matches: (event) => {
+          if (event.type !== "task.completed") {
+            return undefined;
+          }
+          const taskId = event.payload.taskId;
+          if (taskId === "subagent:sa-1") return "completed";
+          if (taskId === "subagent:sa-2") return "failed";
+          if (taskId === "subagent:sa-3") return "aborted";
+          return undefined;
+        },
       });
 
       yield* adapter.startSession({
@@ -1937,10 +1962,19 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       yield* nextCommand(state);
 
       yield* Deferred.await(completed);
+      yield* Deferred.await(failed);
+      yield* Deferred.await(aborted);
       const events = yield* Ref.get(collector.events);
       const startedEvent = events.find((event) => event.type === "task.started");
       const progressEvent = events.find((event) => event.type === "task.progress");
-      const completedEvent = events.find((event) => event.type === "task.completed");
+      const completedEvents = events.filter((event) => event.type === "task.completed");
+      const completedEvent = completedEvents.find(
+        (event) => event.payload.taskId === "subagent:sa-1",
+      );
+      const failedEvent = completedEvents.find((event) => event.payload.taskId === "subagent:sa-2");
+      const abortedEvent = completedEvents.find(
+        (event) => event.payload.taskId === "subagent:sa-3",
+      );
 
       expect(startedEvent?.payload).toMatchObject({
         taskId: "subagent:sa-1",
@@ -1953,6 +1987,23 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       expect(completedEvent?.payload).toMatchObject({
         taskId: "subagent:sa-1",
         status: "completed",
+      });
+      // Terminal tone inputs: failed stays failed, aborted maps to stopped
+      // (the projection tones failed → error and everything else → info).
+      expect(failedEvent?.payload).toMatchObject({
+        taskId: "subagent:sa-2",
+        status: "failed",
+        summary: "hit an upstream timeout",
+      });
+      expect(failedEvent?.eventId).toBe(
+        events.find(
+          (event) => event.type === "task.started" && event.payload.taskId === "subagent:sa-2",
+        )?.eventId,
+      );
+      expect(abortedEvent?.payload).toMatchObject({
+        taskId: "subagent:sa-3",
+        status: "stopped",
+        summary: "cancelled",
       });
       // recentOutput is scrubbed: whitespace-collapsed and truncated.
       const progressPayload = progressEvent?.payload as { description: string; summary?: string };

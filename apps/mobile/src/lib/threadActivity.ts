@@ -49,6 +49,7 @@ export interface ThreadFeedActivity {
     | "globe"
     | "hammer"
     | "message"
+    | "subagent"
     | "warning"
     | "wrench"
     | "zap";
@@ -286,13 +287,17 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
   const commandPreview = extractToolCommand(payload);
   const changedFiles = extractChangedFiles(payload);
   const title = extractToolTitle(payload);
-  const isTaskActivity = activity.kind === "task.progress" || activity.kind === "task.completed";
+  const isTaskLikeActivity =
+    activity.kind === "task.progress" ||
+    activity.kind === "task.completed" ||
+    activity.kind === "subagent.progress" ||
+    activity.kind === "subagent.completed";
   const taskSummary =
-    isTaskActivity && typeof payload?.summary === "string" && payload.summary.length > 0
+    isTaskLikeActivity && typeof payload?.summary === "string" && payload.summary.length > 0
       ? payload.summary
       : null;
   const taskDetailAsLabel =
-    isTaskActivity &&
+    isTaskLikeActivity &&
     !taskSummary &&
     typeof payload?.detail === "string" &&
     payload.detail.length > 0
@@ -305,7 +310,7 @@ function toDerivedWorkLogEntry(activity: OrchestrationThreadActivity): DerivedWo
     turnId: activity.turnId,
     label: taskLabel || activity.summary,
     tone:
-      activity.kind === "task.progress"
+      activity.kind === "task.progress" || activity.kind === "subagent.progress"
         ? "thinking"
         : activity.tone === "approval"
           ? "info"
@@ -531,6 +536,13 @@ function workEntryStatus(entry: WorkLogEntry): ThreadFeedActivity["status"] {
 }
 
 function workEntryIcon(entry: DerivedWorkLogEntry): ThreadFeedActivity["icon"] {
+  if (
+    entry.activityKind === "subagent.started" ||
+    entry.activityKind === "subagent.progress" ||
+    entry.activityKind === "subagent.completed"
+  ) {
+    return "subagent";
+  }
   if (
     entry.activityKind === "user-input.requested" ||
     entry.activityKind === "user-input.resolved"

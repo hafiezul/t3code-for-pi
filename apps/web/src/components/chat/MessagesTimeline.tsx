@@ -55,6 +55,7 @@ import {
   SquarePenIcon,
   TerminalIcon,
   Undo2Icon,
+  UsersIcon,
   WrenchIcon,
   XIcon,
   ZapIcon,
@@ -1802,6 +1803,7 @@ type WorkEntryIconName =
   | "message-circle"
   | "square-pen"
   | "terminal"
+  | "users"
   | "wrench"
   | "x"
   | "zap";
@@ -1826,6 +1828,8 @@ function WorkEntryIconSvg({ name, className }: { name: WorkEntryIconName; classN
       return <SquarePenIcon className={className} aria-hidden />;
     case "terminal":
       return <TerminalIcon className={className} aria-hidden />;
+    case "users":
+      return <UsersIcon className={className} aria-hidden />;
     case "wrench":
       return <WrenchIcon className={className} aria-hidden />;
     case "x":
@@ -1922,6 +1926,13 @@ function workEntryIconName(workEntry: TimelineWorkEntry): WorkEntryIconName {
     workEntry.sourceActivityKind === "user-input.resolved"
   ) {
     return "message-circle";
+  }
+  if (
+    workEntry.sourceActivityKind === "subagent.started" ||
+    workEntry.sourceActivityKind === "subagent.progress" ||
+    workEntry.sourceActivityKind === "subagent.completed"
+  ) {
+    return "users";
   }
   if (workEntry.requestKind === "command") return "terminal";
   if (workEntry.requestKind === "file-read") return "eye";

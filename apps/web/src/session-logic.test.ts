@@ -928,6 +928,93 @@ describe("deriveWorkLogEntries", () => {
     expect(entries[0]?.tone).toBe("error");
   });
 
+  it("keeps subagent.started as a row, unlike task.started", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "subagent:sa-1",
+        createdAt: "2026-02-23T00:00:01.000Z",
+        kind: "subagent.started",
+        summary: "Subagent started",
+        tone: "info",
+        payload: { taskId: "subagent:sa-1", taskType: "subagent", detail: "tester" },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.id).toBe("subagent:sa-1");
+    expect(entries[0]?.label).toBe("Subagent started");
+    expect(entries[0]?.tone).toBe("info");
+    expect(entries[0]?.sourceActivityKind).toBe("subagent.started");
+  });
+
+  it("labels subagent.progress from the payload and renders it as thinking", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "subagent:sa-1",
+        createdAt: "2026-02-23T00:00:02.000Z",
+        kind: "subagent.progress",
+        summary: "Subagent working",
+        tone: "info",
+        payload: {
+          taskId: "subagent:sa-1",
+          taskType: "subagent",
+          title: "running step 2",
+          detail: "parsing config",
+          summary: "parsing config",
+        },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]?.label).toBe("parsing config");
+    expect(entries[0]?.tone).toBe("thinking");
+    expect(entries[0]?.detail).toBe("parsing config");
+  });
+
+  it("tones subagent.completed failed rows as error and completed rows as info", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "subagent:sa-ok",
+        createdAt: "2026-02-23T00:00:03.000Z",
+        kind: "subagent.completed",
+        summary: "Subagent completed",
+        tone: "info",
+        payload: { taskId: "subagent:sa-ok", taskType: "subagent", status: "completed" },
+      }),
+      makeActivity({
+        id: "subagent:sa-fail",
+        createdAt: "2026-02-23T00:00:04.000Z",
+        kind: "subagent.completed",
+        summary: "Subagent failed",
+        tone: "error",
+        payload: {
+          taskId: "subagent:sa-fail",
+          taskType: "subagent",
+          status: "failed",
+          summary: "hit an upstream timeout",
+          detail: "hit an upstream timeout",
+        },
+      }),
+      makeActivity({
+        id: "subagent:sa-stop",
+        createdAt: "2026-02-23T00:00:05.000Z",
+        kind: "subagent.completed",
+        summary: "Subagent stopped",
+        tone: "info",
+        payload: { taskId: "subagent:sa-stop", taskType: "subagent", status: "stopped" },
+      }),
+    ];
+
+    const entries = deriveWorkLogEntries(activities);
+    expect(entries).toHaveLength(3);
+    expect(entries[0]?.tone).toBe("info");
+    expect(entries[1]?.tone).toBe("error");
+    expect(entries[1]?.label).toBe("hit an upstream timeout");
+    expect(entries[2]?.tone).toBe("info");
+  });
+
   it("carries extension.notice severity for per-kind chrome", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({
