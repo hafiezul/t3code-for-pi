@@ -1,5 +1,5 @@
 /**
- * OmpAdapter — per-thread `omp --mode rpc` session adapter.
+ * OmpAdapter — per-thread `omp --mode rpc-ui` session adapter.
  *
  * Mirrors the Pi adapter's T3-integration architecture (per-thread RPC
  * subprocess, table-driven event translation, session-leaf boundaries in
@@ -121,8 +121,14 @@ export function resolveOmpApprovalMode(
 
 /**
  * Launch argument contract:
- *   - always `--mode rpc --session-dir <dir>` (OMP has no `--session-id`;
- *     a fresh session is created in the session dir);
+ *   - always `--mode rpc-ui --session-dir <dir>` (ADR 0001 decision 5:
+ *     rpc-ui is wire-identical to rpc but also exposes OMP's Ask tool,
+ *     whose `select` dialogs map onto T3 user-input questions; MCP
+ *     discovery starts in both modes and never blocks boot — OMP races
+ *     startup connects against a 250 ms bound and finishes slow servers
+ *     in the background, so first-turn tool availability is unchanged);
+ *     OMP has no `--session-id`; a fresh session is created in the
+ *     session dir.
  *   - resuming a forked session passes `--resume <sessionFile>`;
  *   - `--profile <name>` when the instance has one (per-instance isolation
  *     of auth/sessions/settings/caches);
@@ -149,7 +155,7 @@ export const resolveOmpLaunchArgs = (input: {
   readonly configOverlay?: string | undefined;
   readonly launchArgs: string;
 }): ReadonlyArray<string> => {
-  const args = ["--mode", "rpc", "--session-dir", input.sessionDir, "--cwd", input.cwd];
+  const args = ["--mode", "rpc-ui", "--session-dir", input.sessionDir, "--cwd", input.cwd];
   const cursor = input.resumeCursor;
   if (cursor?.sessionFile) {
     args.push("--resume", cursor.sessionFile);

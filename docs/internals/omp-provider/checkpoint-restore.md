@@ -24,7 +24,7 @@ the same session file**. Source says otherwise:
 - The true in-place leaf move exists (`navigateTree`, `agent-session.ts:7853` — "stays in
   the same file", plus `session-manager.branch`/`setLeaf`, `session-manager.ts:2303-2310`)
   but is exposed over **ACP and the interactive TUI only** — not over the RPC command
-  surface. T3 drives `--mode rpc` (ADR 0001), so it cannot reach it.
+  surface. T3 drives `--mode rpc-ui` (ADR 0001), so it cannot reach it.
 - The prototype's "same process, same session file" was an inference — it never checked
   `get_state.sessionFile`/`sessionId` after branching. Its observations (4 → 2 messages,
   continuation appends cleanly) are fully consistent with the fork reading: the new file
@@ -56,7 +56,7 @@ numTurns })` with `numTurns = currentCheckpointTurnCount − targetTurnCount`. T
 discarded turn's user prompt>)`, then re-reads `get_state` and refreshes
    `sessionFile`/`sessionId` in the resume cursor (mirroring Pi's post-fork rebind), then
    re-subscribes subagents (see 4). Rejected: driving ACP mode to reach `navigateTree`
-   (violates ADR 0001's `--mode rpc`; a second protocol adapter) and relaunching the process
+   (violates ADR 0001's `--mode rpc-ui`; a second protocol adapter) and relaunching the process
    (unnecessary — the fork is live).
 2. **Mid-turn guard: refuse while streaming.** `prompt` is fire-and-forget
    (`rpc-mode.ts:1029` — "Don't await - events will stream"), so `branch` can arrive

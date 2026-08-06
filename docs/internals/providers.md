@@ -27,7 +27,9 @@ transport, config, and event shapes are mapped.
 
 ## OMP
 
-OMP runs as a JSONL-over-stdio RPC subprocess (`omp --mode rpc`, protocol v2, floor v17.0.9); the
+OMP runs as a JSONL-over-stdio RPC subprocess (`omp --mode rpc-ui` — exposes OMP's Ask tool,
+whose dialogs surface as T3 user-input questions; wire-identical to `rpc` otherwise, protocol
+v2, floor v17.0.9); the
 config/auth/profile layout is researched in [config-auth-profiles.md](./omp-provider/config-auth-profiles.md).
 Key points:
 

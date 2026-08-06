@@ -83,6 +83,12 @@ appears when the subagent starts, updates in place as it reports progress (progr
 like thinking), and settles with a done or error state when it finishes. The rows stay in the log
 as history after the session ends.
 
+## Asking Questions
+
+When the agent needs your input, it can use OMP's Ask tool: the question opens in T3 Code's
+question prompt with the agent's suggested options (or a free-text answer), and the turn
+continues once you answer. Interrupting the turn cancels the question instead.
+
 ## Permissions
 
 OMP's tool-approval prompts map onto T3 Code's approval flow:

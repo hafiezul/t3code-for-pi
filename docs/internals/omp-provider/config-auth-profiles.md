@@ -79,7 +79,10 @@ installs get the version advisory without an inline update.
 
 ## What a T3 settings surface needs
 
-1. Launch OMP with `--mode rpc`, `--profile <name>` (per instance), `--session-dir`, and a `--config` overlay file carrying per-session overrides (modelRoles, thinking, approval, extensions) — leaving the user's `config.yml` untouched.
+1. Launch OMP with `--mode rpc-ui` (ADR 0001 decision 5 — exposes OMP's Ask tool; wire-identical
+   to `rpc` otherwise), `--profile <name>` (per instance), `--session-dir`, and a `--config`
+   overlay file carrying per-session overrides (modelRoles, thinking, approval, extensions) —
+   leaving the user's `config.yml` untouched.
 2. Model picking: read the catalog via `omp models ls --json` (cache-backed) or `models.db`; write `models.yml` for custom providers (and treat its plaintext `apiKey` fields as secret, `0600`-grade).
 3. Auth: forward provider keys through `process.env` (exact names above) or read stored keys with `omp token <provider>`; per-profile isolation comes free with `--profile`.
 4. Config editing: render the 461-key `omp config list --json` inventory, or the curated subset above; write through `omp config set` or direct YAML; changes apply on next launch.

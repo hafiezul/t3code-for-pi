@@ -283,7 +283,7 @@ describe("checkOmpProviderStatus", () => {
         if (args[0] === "--version") {
           return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
         }
-        expect(args).toEqual(["--mode", "rpc", "--no-session"]);
+        expect(args).toEqual(["--mode", "rpc-ui", "--no-session"]);
         return makeStdoutHandle(
           JSON.stringify({
             type: "response",
@@ -416,7 +416,7 @@ describe("checkOmpProviderStatus", () => {
   });
 
   it("exposes the command inventory when the probe succeeds", async () => {
-    // Both RPC probes share `--mode rpc --no-session`; the models probe
+    // Both RPC probes share `--mode rpc-ui --no-session`; the models probe
     // runs first, then the commands probe.
     let rpcCalls = 0;
     const spawner = makeScriptedSpawner({
@@ -439,7 +439,7 @@ describe("checkOmpProviderStatus", () => {
             }) + "\n",
           );
         }
-        expect(args).toEqual(["--mode", "rpc", "--no-session"]);
+        expect(args).toEqual(["--mode", "rpc-ui", "--no-session"]);
         return makeStdoutHandle(
           JSON.stringify({
             type: "response",

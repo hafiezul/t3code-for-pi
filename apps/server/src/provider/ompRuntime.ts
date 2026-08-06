@@ -21,7 +21,7 @@
  *   - The `ready` hello precedes any response; commands sent before it are
  *     rejected by the child, so the client gates its first command on it.
  *
- * The client is process-scoped: one instance per spawned `omp --mode rpc`
+ * The client is process-scoped: one instance per spawned `omp --mode rpc-ui`
  * child. It owns the stdout reader fiber and the pending-command table;
  * the caller owns the process lifecycle (spawn scope, exit watcher) and
  * must call `failPending` when the process dies so in-flight commands

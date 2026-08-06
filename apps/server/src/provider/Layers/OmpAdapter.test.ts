@@ -76,7 +76,7 @@ describe("resolveOmpLaunchArgs", () => {
       }),
     ).toEqual([
       "--mode",
-      "rpc",
+      "rpc-ui",
       "--session-dir",
       "/tmp/t3/omp/sessions/x",
       "--cwd",
@@ -108,7 +108,7 @@ describe("resolveOmpLaunchArgs", () => {
       }),
     ).toEqual([
       "--mode",
-      "rpc",
+      "rpc-ui",
       "--session-dir",
       "/tmp/t3/omp/sessions/x",
       "--cwd",
@@ -142,7 +142,7 @@ describe("resolveOmpLaunchArgs", () => {
     });
     expect(args).toEqual([
       "--mode",
-      "rpc",
+      "rpc-ui",
       "--session-dir",
       "/tmp/t3/omp/sessions/x",
       "--cwd",
@@ -165,7 +165,7 @@ describe("resolveOmpLaunchArgs", () => {
     });
     expect(args).toEqual([
       "--mode",
-      "rpc",
+      "rpc-ui",
       "--session-dir",
       "/tmp/t3/omp/sessions/x",
       "--cwd",
@@ -314,6 +314,89 @@ describe("mapOmpEvent", () => {
     expect(completed[0]?.payload).toMatchObject({ status: "failed" });
   });
 
+  it("shows the rpc-ui Ask tool as a dynamic tool call, never as text", () => {
+    // ADR 0001 decision 5: rpc-ui exposes OMP's Ask tool. Its stream is a
+    // toolCall delta inside the assistant message (dropped — the
+    // `tool_execution_*` events own the item), then the tool execution
+    // frames, which must surface as a tool item. A regression here would
+    // make the question look like a plain assistant response.
+    expect(
+      mapOmpEvent(
+        {
+          type: "message_update",
+          assistantMessageEvent: { type: "toolcall_start", contentIndex: 1 },
+        },
+        baseInput,
+      ),
+    ).toEqual([]);
+    expect(
+      mapOmpEvent(
+        {
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "toolcall_delta",
+            contentIndex: 1,
+            delta: '{"name":"ask","arguments":{',
+          },
+        },
+        baseInput,
+      ),
+    ).toEqual([]);
+    expect(
+      mapOmpEvent(
+        {
+          type: "tool_execution_start",
+          toolName: "ask",
+          toolCallId: "call_ask_1",
+          args: { questions: [{ id: "lunch", question: "What for lunch?" }] },
+        },
+        baseInput,
+      ),
+    ).toEqual([
+      {
+        turnId: turnId("t1"),
+        itemId: "call_ask_1",
+        type: "item.started",
+        payload: {
+          itemType: "dynamic_tool_call",
+          status: "inProgress",
+          title: "ask",
+          data: {
+            tool: "ask",
+            args: { questions: [{ id: "lunch", question: "What for lunch?" }] },
+          },
+        },
+      },
+    ]);
+    expect(
+      mapOmpEvent(
+        {
+          type: "tool_execution_end",
+          toolName: "ask",
+          toolCallId: "call_ask_1",
+          result: { content: [{ type: "text", text: "User answers:\n- Pizza" }] },
+        },
+        baseInput,
+      ),
+    ).toEqual([
+      {
+        turnId: turnId("t1"),
+        itemId: "call_ask_1",
+        type: "item.completed",
+        payload: {
+          itemType: "dynamic_tool_call",
+          status: "completed",
+          title: "ask",
+          detail: "User answers:\n- Pizza",
+          data: {
+            tool: "ask",
+            result: { content: [{ type: "text", text: "User answers:\n- Pizza" }] },
+          },
+        },
+      },
+    ]);
+  });
+
   it("maps compactions and never settles on per-assistant turn_end", () => {
     expect(
       mapOmpEvent(
@@ -447,7 +530,7 @@ const makeScriptedState = (handler: ScriptedOmpState["handler"]): Effect.Effect<
   });
 
 /**
- * Fake ChildProcessSpawner that answers `omp --mode rpc` with a JSONL
+ * Fake ChildProcessSpawner that answers `omp --mode rpc-ui` with a JSONL
  * round-trip: every command written to stdin is recorded on `observed` and
  * the handler's replies are streamed back on stdout. The `ready` hello is
  * offered at spawn (the client gates its first command on it); a custom
@@ -644,7 +727,7 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       expect(session.status).toBe("ready");
       expect(spawnArgs[0]).toEqual([
         "--mode",
-        "rpc",
+        "rpc-ui",
         "--session-dir",
         expect.stringContaining("omp/sessions/"),
         "--cwd",

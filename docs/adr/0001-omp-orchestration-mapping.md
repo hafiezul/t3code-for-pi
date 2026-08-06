@@ -42,9 +42,20 @@ contract changes.
    `always-ask`, `auto-accept-edits` → `write`. `acceptForSession` has no OMP equivalent
    (approval mode is a launch flag, not runtime-switchable) and maps to a single `Approve`.
    This makes OMP the first T3 provider whose approval machinery is live, not inert.
-5. **Mode.** T3 spawns OMP with `--mode rpc`. `rpc-ui` is wire-identical but adds the Ask tool,
-   deferred MCP discovery, and usage-reserve confirmation dialogs — interactive-TUI concerns
-   outside the destination. Extension UI and approval dialogs flow in plain `rpc` too.
+5. **Mode.** T3 spawns OMP with `--mode rpc-ui`. `rpc-ui` is wire-identical to `rpc` (same
+   `ready` hello, command surface, agent events, extension-UI frames — verified frame-by-frame
+   on the 17.2.7 binary) but also exposes OMP's Ask tool, whose `select` dialogs flow through
+   the decision-3 mapping into T3's user-input panel (an ask with free-text intent arrives with
+   an "Other (type your own)" option; T3's panel accepts typed answers either way). Updated
+   from the original `--mode rpc` choice: the two costs that motivated it did not survive
+   verification against OMP 17.2.x. Deferred MCP discovery is a ~250 ms head-start either way
+   (OMP races startup connects against a 250 ms bound and finishes slow servers in the
+   background in both modes; rpc-ui merely starts discovery post-boot and registers pending
+   tool stubs). Usage-reserve confirmation dialogs are never raised by RPC hosts: OMP installs
+   the usage-fallback confirmer only in the interactive TUI and ACP, so both rpc and rpc-ui
+   fall back silently (and the feature defaults off). Extension UI and approval dialogs flow in
+   plain `rpc` too, but the Ask tool does not exist there — a headless agent that wanted to
+   ask just wrote the question as text.
 6. **Adapter shape.** Fresh `OmpDriver` (RPC client: `ready` handshake, JSONL framing,
    optional protocol-v2 negotiation for >1 MiB frames) + `OmpAdapter` + `OmpProvider`, reusing
    PiAdapter's T3-integration patterns (turn lifecycle, item table, pump, pending-request map,
@@ -61,10 +72,15 @@ contract changes.
 - **Route approval dialogs as plain user-input questions.** Simpler, but leaves T3's approval
   chip, `notifyOnApproval`, and approval-policy settings inert; the destination names approval
   flows as a headline capability.
-- **`--mode rpc-ui`.** Enables the Ask tool, but defers MCP discovery and adds usage-reserve
-  confirmation dialogs — mid-turn friction for a headless host.
-- **`--mode rpc-ui` with auto-accepted usage-reserve.** Gets the Ask tool without friction;
-  still pays deferred MCP discovery; the Ask tool is not in the destination's feature list.
+- **Keep `--mode rpc` (the original default).** Wire-identical for everything except the Ask
+  tool, and the Ask tool was originally out of the destination's feature list. Retired when
+  asking questions became a named capability: a model that needs input has no channel in rpc
+  and falls back to writing the question as plain text, which T3 renders as a normal response.
+  The original fear of mid-turn friction from rpc-ui (deferred MCP discovery, usage-reserve
+  confirmation dialogs) did not survive verification against OMP 17.2.x — see decision 5.
+- **`--mode rpc-ui` with the Ask tool stripped at the adapter.** Gets the same wire surface
+  without model-visible questions; pays the same (non-)costs as rpc-ui and keeps the model
+  without a question channel. Rejected: the Ask channel is the point.
 
 ## Consequences
 
@@ -76,3 +92,11 @@ contract changes.
   (`resolveOmpApprovalMode` in `OmpAdapter.ts`, covered by `OmpAdapter.test.ts`).
 - `agent_end` with `isTerminal: false` keeps the T3 turn open; the boundary and resume-cursor
   mechanics key on terminal settles, which the checkpoint-restore ticket builds on.
+- rpc-ui consequences: OMP's Ask tool is model-visible, and its dialogs surface as T3
+  user-input questions (options plus OMP's literal "Other (type your own)" entry; typed
+  answers ride the same `extension_ui_response` value). Custom tools and commands see
+  `hasUI=true` in rpc-ui and may take interactive branches that plain rpc suppresses — all
+  still flow through `extension_ui_request`, which the adapter maps. OMP's plan-mode
+  enforcement (`ask` + `write` must both be registered) activates when plan mode is enabled,
+  where it was skipped in rpc; T3 does not drive OMP plan mode, so this only matters for
+  users who enable it through OMP config.

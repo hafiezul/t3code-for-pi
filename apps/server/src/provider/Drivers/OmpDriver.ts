@@ -1,5 +1,5 @@
 /**
- * OmpDriver — `ProviderDriver` for the OMP runtime (`omp --mode rpc`).
+ * OmpDriver — `ProviderDriver` for the OMP runtime (`omp --mode rpc-ui`).
  *
  * Mirrors the Pi driver: a plain value whose `create()` bundles
  * `snapshot` / `adapter` / `textGeneration` closures over the per-instance

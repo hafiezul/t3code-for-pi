@@ -361,7 +361,7 @@ const runOmpRpcProbe = (input: {
   Effect.gen(function* () {
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
     const child = yield* spawner.spawn(
-      ChildProcess.make(input.binaryPath, ["--mode", "rpc", "--no-session"], {
+      ChildProcess.make(input.binaryPath, ["--mode", "rpc-ui", "--no-session"], {
         cwd: input.cwd,
         env: input.env,
         extendEnv: false,
