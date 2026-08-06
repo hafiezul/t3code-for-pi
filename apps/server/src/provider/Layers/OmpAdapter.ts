@@ -38,6 +38,7 @@ import {
 } from "@t3tools/contracts";
 import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
@@ -59,7 +60,12 @@ import {
   ProviderAdapterValidationError,
   type ProviderAdapterError,
 } from "../Errors.ts";
-import { makeOmpRpcClient, type OmpRpcClient, type OmpRpcEvent } from "../ompRuntime.ts";
+import {
+  makeOmpRpcClient,
+  OmpRpcCommandError,
+  type OmpRpcClient,
+  type OmpRpcEvent,
+} from "../ompRuntime.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { makeEventNdjsonLogger, type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import type { OmpSettings } from "@t3tools/contracts";
@@ -83,6 +89,14 @@ const isOmpValidationError = Schema.is(ProviderAdapterValidationError);
 
 export const isOmpResumeCursor = (value: unknown): value is OmpResumeCursor =>
   isOmpResumeCursorValue(value);
+
+/**
+ * True when a provider request error is a timed-out RPC command (not a
+ * rejection, a write failure, or process death). Only timeouts can hide a
+ * live agent loop behind a missing response line.
+ */
+const isOmpPromptTimeoutError = (error: ProviderAdapterRequestError): boolean =>
+  error.cause instanceof OmpRpcCommandError && error.cause.detail.includes("timed out after");
 
 /** T3 runtime mode → OMP `--approval-mode` flag (ADR 0001 decision 4). */
 export type OmpApprovalMode = "yolo" | "always-ask" | "write";
@@ -1621,6 +1635,34 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
     );
   });
 
+  /**
+   * After a fresh-turn `prompt` timeout, decide whether OMP is actually
+   * working (its response line is just late) or stuck (no work at all).
+   * Returns true when the turn must stay open and let the late `agent_end`
+   * settle it instead of failing.
+   */
+  const reconcilePromptTimeout = Effect.fn("reconcilePromptTimeout")(function* (
+    context: OmpAdapterSessionContext,
+  ) {
+    if (yield* Ref.get(context.agentActivitySincePromptRef)) {
+      return true;
+    }
+    const stillStreaming = yield* context.client.send({ type: "get_state" }).pipe(
+      Effect.map((response) => {
+        const data = (response.data ?? {}) as Record<string, unknown>;
+        return data.isStreaming === true;
+      }),
+      // A failed probe cannot prove the agent is idle — err on keeping the
+      // turn open (same policy as the command-turn grace window).
+      Effect.catch((cause) =>
+        Effect.logWarning("OMP get_state probe failed after prompt timeout", {
+          detail: cause.detail,
+        }).pipe(Effect.as(true)),
+      ),
+    );
+    return stillStreaming;
+  });
+
   const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = Effect.fn("sendTurn")(
     function* (input: ProviderSendTurnInput) {
       const context = yield* requireSession(input.threadId);
@@ -1754,6 +1796,10 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
           type: "turn.started",
           payload: modelSelection && modelSwitchApplied ? { model: modelSelection.model } : {},
         });
+        // Fresh-turn activity signal: reset so a prompt-timeout
+        // reconciliation can tell whether the agent loop streamed for THIS
+        // prompt rather than an earlier one.
+        yield* Ref.set(context.agentActivitySincePromptRef, false);
       }
 
       const command = {
@@ -1761,6 +1807,10 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         ...(text ? { message: text } : {}),
         ...(images.length > 0 ? { images } : {}),
       };
+      // Set when the stuck-prompt path decides to fail: the failure cleanup
+      // below then aborts OMP once the turn state is cleared, so no queued
+      // work executes after the failure.
+      const stuckPromptAbort = yield* Ref.make(false);
       const promptResponse = yield* context.client.send(command).pipe(
         Effect.mapError(
           (cause) =>
@@ -1771,6 +1821,34 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
               cause,
             }),
         ),
+        // A timed-out prompt is not necessarily a failed prompt: OMP may
+        // have accepted it and be streaming the agent loop while its
+        // response line is late. Declaring the turn failed then would
+        // orphan the running work — turnId-less messages would keep
+        // streaming, tools would keep executing, and no completion would
+        // ever fire. Reconcile with the live loop before failing a fresh
+        // turn. A failed steer leaves the still-running original turn
+        // untouched, timeout or not.
+        Effect.catch((requestError) => {
+          if (steeringTurnId !== undefined || !isOmpPromptTimeoutError(requestError)) {
+            return Effect.fail(requestError);
+          }
+          return reconcilePromptTimeout(context).pipe(
+            Effect.flatMap((working) => {
+              if (working) {
+                // The agent loop is alive: keep the turn open and let the
+                // late `agent_end` settle it normally.
+                return Effect.succeed(undefined);
+              }
+              // Nothing streamed and OMP reports idle: the prompt is
+              // stuck. Fail the turn; the failure cleanup aborts OMP so no
+              // queued work executes after the failure.
+              return Ref.set(stuckPromptAbort, true).pipe(
+                Effect.andThen(Effect.fail(requestError)),
+              );
+            }),
+          );
+        }),
         // On failure of a fresh turn: clear active-turn state, flip the
         // session back to ready with lastError set, emit turn.aborted, then
         // propagate the typed error. A failed steer leaves the still-running
@@ -1799,6 +1877,21 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
                   type: "turn.aborted",
                   payload: { reason: requestError.detail },
                 });
+                // Stuck-prompt failure: OMP may still have the prompt
+                // queued. Abort now that the turn state is cleared — a
+                // trailing `agent_end` is already blocked by the cleared
+                // activeTurnId, so no suppress flag is needed (a one-shot
+                // flag would leak into the next turn when no `agent_end`
+                // follows, hanging that turn's settle).
+                if (yield* Ref.getAndSet(stuckPromptAbort, false)) {
+                  yield* context.client.send({ type: "abort" }).pipe(
+                    // The channel may be wedged (that is why the prompt
+                    // timed out); the best-effort abort must never extend
+                    // the failure path.
+                    Effect.timeout(Duration.millis(5_000)),
+                    Effect.ignore,
+                  );
+                }
               }),
         ),
       );
@@ -1808,8 +1901,15 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
       // of the agent loop, and no `agent_end` will come. Synthesize the
       // completion. A missing flag (unknown protocol age) errs on keeping
       // the turn open — `agent_end` or the exit watcher will close it.
-      const promptData = (promptResponse.data ?? {}) as Record<string, unknown>;
-      if (steeringTurnId === undefined && promptData.agentInvoked === false) {
+      const promptData = (promptResponse?.data ?? {}) as Record<string, unknown>;
+      // `promptResponse === undefined` is the prompt-timeout reconciliation:
+      // the agent loop is already streaming, so the late `agent_end` owns
+      // the settle instead of this synthetic completion.
+      if (
+        promptResponse !== undefined &&
+        steeringTurnId === undefined &&
+        promptData.agentInvoked === false
+      ) {
         yield* Ref.set(context.agentActivitySincePromptRef, false);
         // Node timer, not `Effect.sleep`: the adapter's tests run under a
         // TestClock where Effect.sleep never resumes, and production time is

@@ -464,7 +464,11 @@ const makeScriptedSpawner = (
         return yield* Effect.die(new Error("expected a standard omp command"));
       }
       onSpawn?.(command.args, command.options);
-      yield* Queue.offer(state.output, Buffer.from(`${JSON.stringify(readyFrame)}\n`));
+      yield* Queue.offer(
+        state.output,
+        // @effect-diagnostics-next-line preferSchemaOverJson:off
+        Buffer.from(`${JSON.stringify(readyFrame)}\n`),
+      );
       const stdin = Sink.forEach((chunk: Uint8Array) =>
         Effect.gen(function* () {
           const text = Buffer.from(chunk).toString("utf8").trim();
@@ -505,6 +509,19 @@ const makeScriptedSpawner = (
 
 const nextCommand = (state: ScriptedOmpState) =>
   Queue.take(state.observed).pipe(Effect.map((entry) => entry.command));
+
+/**
+ * Fire the RPC client's command deadline (OMP_COMMAND_TIMEOUT_MS = 30 s)
+ * under the test clock, with scheduler hops so the racing timeout fiber
+ * registers its wakeup. Mirrors the protocol-negotiation timeout test.
+ */
+const advancePastOmpCommandTimeout = () =>
+  Effect.gen(function* () {
+    for (let attempt = 0; attempt < 400; attempt += 1) {
+      yield* TestClock.adjust("100 millis");
+      yield* Effect.yieldNow;
+    }
+  });
 
 const testLayer = (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]) =>
   ServerConfig.layerTest(process.cwd(), { prefix: "omp-adapter-test" }).pipe(
@@ -2451,6 +2468,405 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       yield* adapter.stopAll();
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
     }),
+  );
+
+  it.effect(
+    "keeps a fresh turn open when the prompt response times out but the agent loop is streaming",
+    () =>
+      Effect.gen(function* () {
+        let getStateCalls = 0;
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state": {
+              getStateCalls += 1;
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: getStateCalls > 1,
+                  },
+                }),
+              ];
+            }
+            case "prompt":
+              // No response line, ever: the RPC deadline fires. But the agent
+              // loop streams — the exact shape of the reported incident.
+              return [
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_update",
+                  assistantMessageEvent: { type: "text_delta", delta: "Hi" },
+                },
+                {
+                  type: "message_end",
+                  message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+                },
+                { type: "agent_end", isTerminal: true },
+              ];
+            case "get_branch_messages":
+              return [
+                reply(command, {
+                  data: {
+                    entries: [{ entryId: "u1", text: "hi" }],
+                  },
+                }),
+              ];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled },
+          matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        const started = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "hi",
+            modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          })
+          .pipe(Effect.forkScoped);
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        // The events settled the turn already; now fire the RPC deadline so
+        // sendTurn's reconciliation runs against the streamed loop.
+        yield* advancePastOmpCommandTimeout();
+        const turnStart = yield* Fiber.join(started);
+        yield* Deferred.await(settled);
+
+        expect(turnStart.turnId).toBeDefined();
+        const events = yield* Ref.get(collector.events);
+        const completed = events.filter((event) => event.type === "turn.completed");
+        expect(completed).toHaveLength(1);
+        expect(completed[0]?.payload).toMatchObject({ state: "completed" });
+        expect(completed[0]?.turnId).toBe(turnStart.turnId);
+        expect(events.some((event) => event.type === "turn.aborted")).toBe(false);
+        // No probe and no abort: the activity ref alone reconciled the
+        // timeout; the turn settled normally with its boundary.
+        expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect(
+    "fails a fresh turn and aborts OMP when the prompt times out with no agent activity",
+    () =>
+      Effect.gen(function* () {
+        let promptCalls = 0;
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt": {
+              promptCalls += 1;
+              if (promptCalls === 1) {
+                // No response line and no events: the prompt is stuck, not
+                // working.
+                return [];
+              }
+              // The follow-up turn is a normal one: it must settle even
+              // though the stuck failure path ran before it.
+              return [
+                reply(command, { data: { agentInvoked: true } }),
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_update",
+                  assistantMessageEvent: { type: "text_delta", delta: "Hi" },
+                },
+                {
+                  type: "message_end",
+                  message: { role: "assistant", content: [{ type: "text", text: "Hi" }] },
+                },
+                { type: "agent_end", isTerminal: true },
+              ];
+            }
+            case "get_branch_messages":
+              return [
+                reply(command, {
+                  data: {
+                    entries: [{ entryId: "u1", text: "hi" }],
+                  },
+                }),
+              ];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const aborted = yield* Deferred.make<undefined>();
+        const completed = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { aborted, completed },
+          matches: (event) =>
+            event.type === "turn.aborted"
+              ? "aborted"
+              : event.type === "turn.completed"
+                ? "completed"
+                : undefined,
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        const outcome = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "hi",
+            modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          })
+          .pipe(Effect.forkScoped);
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        yield* advancePastOmpCommandTimeout();
+        const failure = yield* Fiber.join(outcome).pipe(Effect.flip);
+        expect(Schema.is(ProviderAdapterRequestError)(failure)).toBe(true);
+        if (Schema.is(ProviderAdapterRequestError)(failure)) {
+          expect(failure.detail).toContain("timed out after 30000ms");
+        }
+
+        // Reconciliation probe first, then the best-effort abort.
+        expect((yield* nextCommand(state)).type).toBe("get_state");
+        expect((yield* nextCommand(state)).type).toBe("abort");
+
+        yield* Deferred.await(aborted);
+        const events = yield* Ref.get(collector.events);
+        expect(events.some((event) => event.type === "turn.aborted")).toBe(true);
+        const sessions = yield* adapter.listSessions();
+        const session = sessions.find((entry) => entry.threadId === threadId);
+        // The adapter session flips back to ready with lastError set; the
+        // thread projection renders that as the failed turn.
+        expect(session?.status).toBe("ready");
+        expect(session?.lastError).toContain("timed out after 30000ms");
+
+        // Follow-up turn: must settle normally — the stuck failure must not
+        // leak a one-shot suppress flag into it (a leaked flag would eat this
+        // turn's agent_end and leave the thread stuck in "running").
+        yield* adapter.sendTurn({
+          threadId,
+          input: "again",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+        yield* Deferred.await(completed);
+        const completedEvents = (yield* Ref.get(collector.events)).filter(
+          (event) => event.type === "turn.completed",
+        );
+        expect(completedEvents).toHaveLength(1);
+        expect(completedEvents[0]?.payload).toMatchObject({ state: "completed" });
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect("keeps a fresh turn open when the get_state probe fails after a prompt timeout", () =>
+    Effect.gen(function* () {
+      let getStateCalls = 0;
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state": {
+            getStateCalls += 1;
+            if (getStateCalls === 1) {
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            }
+            // The reconciliation probe itself fails: it cannot prove the
+            // agent is idle, so the turn must stay open.
+            return [{ ...reply(command), success: false, error: "probe exploded" }];
+          }
+          case "prompt":
+            return [];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: {},
+        matches: () => undefined,
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      const outcome = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "hi",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        })
+        .pipe(Effect.forkScoped);
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+
+      yield* advancePastOmpCommandTimeout();
+      const turnStart = yield* Fiber.join(outcome);
+      expect(turnStart.turnId).toBeDefined();
+      // The probe was attempted and failed; no abort followed.
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+
+      const events = yield* Ref.get(collector.events);
+      expect(events.some((event) => event.type === "turn.aborted")).toBe(false);
+      const sessions = yield* adapter.listSessions();
+      expect(sessions.find((entry) => entry.threadId === threadId)?.status).toBe("running");
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect(
+    "fails a fresh turn immediately on a rejected prompt, without probing or aborting",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // Rejected, not timed out: the old immediate-failure path must
+              // run — no reconciliation probe, no abort.
+              return [{ ...reply(command), success: false, error: "session busy" }];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const aborted = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { aborted },
+          matches: (event) => (event.type === "turn.aborted" ? "aborted" : undefined),
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        const failure = yield* adapter
+          .sendTurn({
+            threadId,
+            input: "hi",
+            modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          })
+          .pipe(Effect.flip);
+        expect(Schema.is(ProviderAdapterRequestError)(failure)).toBe(true);
+        if (Schema.is(ProviderAdapterRequestError)(failure)) {
+          expect(failure.detail).toBe("session busy");
+        }
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        yield* Deferred.await(aborted);
+        const events = yield* Ref.get(collector.events);
+        expect(events.some((event) => event.type === "turn.aborted")).toBe(true);
+        // No reconciliation probe and no abort followed the rejection.
+        yield* Effect.yieldNow;
+        expect(Option.isNone(yield* Queue.poll(state.observed))).toBe(true);
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
   );
 
   it.effect("reports an unexpected process exit as a failed session", () =>
