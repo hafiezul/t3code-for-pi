@@ -85,6 +85,7 @@ import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as PiSettingsFile from "./provider/Services/PiSettingsFile.ts";
+import * as OmpSettingsFile from "./provider/Services/OmpSettingsFile.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
 import * as PreviewAutomationBroker from "./mcp/PreviewAutomationBroker.ts";
 import * as PreviewManager from "./preview/Manager.ts";
@@ -373,6 +374,7 @@ const makeWsRpcLayer = (
       const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
       const serverSettings = yield* ServerSettings.ServerSettingsService;
       const piSettingsFile = yield* PiSettingsFile.PiSettingsFile;
+      const ompSettingsFile = yield* OmpSettingsFile.OmpSettingsFile;
       const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
       const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
       const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
@@ -1476,6 +1478,14 @@ const makeWsRpcLayer = (
           observeRpcEffect(WS_METHODS.serverPiUpdateSettingsFile, piSettingsFile.write(input), {
             "rpc.aggregate": "server",
           }),
+        [WS_METHODS.serverOmpGetSettingsFile]: (input) =>
+          observeRpcEffect(WS_METHODS.serverOmpGetSettingsFile, ompSettingsFile.read(input), {
+            "rpc.aggregate": "server",
+          }),
+        [WS_METHODS.serverOmpUpdateSettingsFile]: (input) =>
+          observeRpcEffect(WS_METHODS.serverOmpUpdateSettingsFile, ompSettingsFile.write(input), {
+            "rpc.aggregate": "server",
+          }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) =>
           observeRpcEffect(
             WS_METHODS.serverDiscoverSourceControl,
@@ -2142,6 +2152,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
               Layer.provideMerge(RpcSerialization.layerJson),
               Layer.provide(ProviderMaintenanceRunner.layer),
               Layer.provide(PiSettingsFile.PiSettingsFileLive),
+              Layer.provide(OmpSettingsFile.OmpSettingsFileLive),
               Layer.provide(Layer.succeed(ServerSelfUpdate.ServerSelfUpdate, serverSelfUpdate)),
               Layer.provide(
                 SourceControlDiscovery.layer.pipe(

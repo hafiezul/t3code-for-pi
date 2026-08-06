@@ -156,6 +156,12 @@ import {
   PiSettingsFileWriteInput,
 } from "./piSettings.ts";
 import {
+  OmpSettingsFileError,
+  OmpSettingsFileGetInput,
+  OmpSettingsFileSnapshot,
+  OmpSettingsFileWriteInput,
+} from "./ompSettingsFile.ts";
+import {
   SourceControlCloneRepositoryInput,
   SourceControlCloneRepositoryResult,
   SourceControlDiscoveryResult,
@@ -237,6 +243,8 @@ export const WS_METHODS = {
   serverUpdateSettings: "server.updateSettings",
   serverPiGetSettingsFile: "server.piGetSettingsFile",
   serverPiUpdateSettingsFile: "server.piUpdateSettingsFile",
+  serverOmpGetSettingsFile: "server.ompGetSettingsFile",
+  serverOmpUpdateSettingsFile: "server.ompUpdateSettingsFile",
   serverDiscoverSourceControl: "server.discoverSourceControl",
   serverGetTraceDiagnostics: "server.getTraceDiagnostics",
   serverGetProcessDiagnostics: "server.getProcessDiagnostics",
@@ -352,6 +360,18 @@ export const WsServerPiUpdateSettingsFileRpc = Rpc.make(WS_METHODS.serverPiUpdat
   payload: PiSettingsFileWriteInput,
   success: PiSettingsFileSnapshot,
   error: Schema.Union([PiSettingsFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerOmpGetSettingsFileRpc = Rpc.make(WS_METHODS.serverOmpGetSettingsFile, {
+  payload: OmpSettingsFileGetInput,
+  success: OmpSettingsFileSnapshot,
+  error: Schema.Union([OmpSettingsFileError, EnvironmentAuthorizationError]),
+});
+
+export const WsServerOmpUpdateSettingsFileRpc = Rpc.make(WS_METHODS.serverOmpUpdateSettingsFile, {
+  payload: OmpSettingsFileWriteInput,
+  success: OmpSettingsFileSnapshot,
+  error: Schema.Union([OmpSettingsFileError, EnvironmentAuthorizationError]),
 });
 
 export const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -815,6 +835,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsServerUpdateSettingsRpc,
   WsServerPiGetSettingsFileRpc,
   WsServerPiUpdateSettingsFileRpc,
+  WsServerOmpGetSettingsFileRpc,
+  WsServerOmpUpdateSettingsFileRpc,
   WsServerDiscoverSourceControlRpc,
   WsServerGetTraceDiagnosticsRpc,
   WsServerGetProcessDiagnosticsRpc,

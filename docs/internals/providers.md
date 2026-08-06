@@ -17,12 +17,38 @@ orchestration layer does not know which one is behind a thread.
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
 | `pi`          | [`Drivers/PiDriver.ts`][pi]             |
+| `omp`         | [`Drivers/OmpDriver.ts`][omp]           |
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
 `apps/server/src/provider/Layers/` (`CodexAdapter.ts`, `ClaudeAdapter.ts`, and so on) and conform to
 [`ProviderAdapter.ts`][adapter]. Read the driver plus its adapter to see how a specific agent's
 transport, config, and event shapes are mapped.
+
+## OMP
+
+OMP runs as a JSONL-over-stdio RPC subprocess (`omp --mode rpc`, protocol v2, floor v17.0.9); the
+config/auth/profile layout is researched in [config-auth-profiles.md](./omp-provider/config-auth-profiles.md).
+Key points:
+
+- **Sessions**: `--session-dir <state>/omp/sessions/<cwd-hash>`, resuming a fork via
+  `--resume <file>`; `--profile <name>` when the instance sets one (per-instance isolation of
+  auth/sessions/settings/caches), plus deterministic model pinning (`--model provider/model` and
+  `--models provider/*`) and approval-mode flags mapped from the runtime policy.
+- **Turn lifecycle**: `turn.completed` fires only on `agent_end` with `isTerminal !== false`;
+  `abort` arms a suppress flag so the trailing settle is swallowed. Approval dialogs are `select`
+  dialogs with exactly `["Approve","Deny"]`, answered via `thread.approval.respond`.
+- **Subagent rows**: `subagent.started` / `subagent.progress` / `subagent.completed` ride the
+  generic activity slot, upserted in place per OMP subagent id (`subagent:<id>`), scrubbed on the
+  projection path.
+- **Config editor**: `server.ompGetSettingsFile` / `server.ompUpdateSettingsFile` RPCs read and
+  write `config.yml` — `~/.omp/profiles/<name>/agent/config.yml` when the instance sets a profile,
+  else the agent home's file (`PI_CODING_AGENT_DIR` or `~/.omp/agent`). Curated merge of
+  `defaultThinkingLevel` (enum) and `modelRoles` (`role=provider/model` lines), or strict raw
+  whole-file YAML replace; both validated server-side and returning the merged read-back. Direct
+  YAML read/write with the repo's atomic write — never `omp config set` subprocesses. The settings
+  UI is a collapsible "OMP config" section (curated + raw tabs) in the omp instance card; changes
+  apply to new omp sessions only.
 
 ## Pi
 
@@ -125,6 +151,7 @@ when a request opens (approval) or user input is requested, via
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
 [pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
+[omp]: ../../apps/server/src/provider/Drivers/OmpDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
 [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts

@@ -737,6 +737,18 @@ export function createServerEnvironmentAtoms<R, E>(
       scheduler: configScheduler,
       concurrency: configConcurrency,
     }),
+    ompGetSettingsFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:omp-get-settings-file",
+      tag: WS_METHODS.serverOmpGetSettingsFile,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
+    ompUpdateSettingsFile: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:server:omp-update-settings-file",
+      tag: WS_METHODS.serverOmpUpdateSettingsFile,
+      scheduler: configScheduler,
+      concurrency: configConcurrency,
+    }),
     signalProcess: createEnvironmentRpcCommand(runtime, {
       label: "environment-data:server:signal-process",
       tag: WS_METHODS.serverSignalProcess,

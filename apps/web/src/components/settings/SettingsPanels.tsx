@@ -118,6 +118,8 @@ import {
 } from "../ProviderUpdateLaunchNotification.logic";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { PiEnvironmentConfigSection } from "./PiEnvironmentConfigSection";
+import { OmpEnvironmentConfigSection } from "./OmpEnvironmentConfigSection";
+import { readProviderConfigString } from "./ProviderSettingsForm";
 import { DRIVER_OPTIONS, getDriverOption } from "./providerDriverMeta";
 import {
   backgroundActivitySharedPolicySettings,
@@ -2201,6 +2203,13 @@ export function ProviderSettingsPanel() {
                     key={`pi-config:${primaryEnvironment?.environmentId ?? "none"}`}
                     environmentId={primaryEnvironment?.environmentId ?? null}
                     instanceId={row.instanceId}
+                  />
+                ) : row.driver === ProviderDriverKind.make("omp") ? (
+                  <OmpEnvironmentConfigSection
+                    key={`omp-config:${primaryEnvironment?.environmentId ?? "none"}:${row.instanceId}:${readProviderConfigString(row.instance.config, "profile")}`}
+                    environmentId={primaryEnvironment?.environmentId ?? null}
+                    instanceId={row.instanceId}
+                    profile={readProviderConfigString(row.instance.config, "profile")}
                   />
                 ) : undefined
               }

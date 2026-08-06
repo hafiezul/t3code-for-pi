@@ -40,6 +40,8 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.serverUpdateSettings]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverPiGetSettingsFile]: AuthOrchestrationReadScope,
   [WS_METHODS.serverPiUpdateSettingsFile]: AuthOrchestrationOperateScope,
+  [WS_METHODS.serverOmpGetSettingsFile]: AuthOrchestrationReadScope,
+  [WS_METHODS.serverOmpUpdateSettingsFile]: AuthOrchestrationOperateScope,
   [WS_METHODS.serverDiscoverSourceControl]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetTraceDiagnostics]: AuthOrchestrationReadScope,
   [WS_METHODS.serverGetProcessDiagnostics]: AuthOrchestrationReadScope,

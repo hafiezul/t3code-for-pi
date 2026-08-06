@@ -4359,6 +4359,79 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc server.ompGetSettingsFile / server.ompUpdateSettingsFile", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const agentDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ws-omp-config-" });
+
+      const previous = process.env.PI_CODING_AGENT_DIR;
+      process.env.PI_CODING_AGENT_DIR = agentDir;
+      try {
+        yield* buildAppUnderTest();
+        const wsUrl = yield* getWsServerUrl("/ws");
+
+        const missing = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverOmpGetSettingsFile]({ profile: "" }),
+          ),
+        );
+        assert.equal(missing.exists, false);
+        assert.equal(missing.path, path.join(agentDir, "config.yml"));
+        assert.deepEqual(missing.curated, {
+          defaultThinkingLevel: null,
+          modelRoles: null,
+        });
+
+        const written = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverOmpUpdateSettingsFile]({
+              profile: "",
+              mode: "curated",
+              curated: {
+                defaultThinkingLevel: "high",
+                modelRoles: "default=anthropic/claude-sonnet-4-6",
+              },
+            }),
+          ),
+        );
+        assert.equal(written.exists, true);
+        assert.equal(written.malformed, false);
+        assert.deepEqual(written.curated, {
+          defaultThinkingLevel: "high",
+          modelRoles: "default=anthropic/claude-sonnet-4-6",
+        });
+
+        const readBack = yield* Effect.scoped(
+          withWsRpcClient(wsUrl, (client) =>
+            client[WS_METHODS.serverOmpGetSettingsFile]({ profile: "" }),
+          ),
+        );
+        assert.equal(readBack.exists, true);
+        assert.equal(readBack.curated.defaultThinkingLevel, "high");
+
+        const invalid = yield* Effect.flip(
+          Effect.scoped(
+            withWsRpcClient(wsUrl, (client) =>
+              client[WS_METHODS.serverOmpUpdateSettingsFile]({
+                profile: "",
+                mode: "raw",
+                content: "defaultThinkingLevel: [unclosed",
+              }),
+            ),
+          ),
+        );
+        assert.equal(invalid._tag, "OmpSettingsFileError");
+      } finally {
+        if (previous === undefined) {
+          delete process.env.PI_CODING_AGENT_DIR;
+        } else {
+          process.env.PI_CODING_AGENT_DIR = previous;
+        }
+      }
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("shares one preview automation broker across websocket sessions", () =>
     Effect.scoped(
       Effect.gen(function* () {
