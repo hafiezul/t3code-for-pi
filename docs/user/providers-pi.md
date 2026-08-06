@@ -4,7 +4,7 @@
 under T3 Code, and pi's skills, templates, and extensions work through your prompts as usual.
 
 For Codex, see [Codex](./providers-codex.md). For Claude, see [Claude](./providers-claude.md). For
-first-time setup, see [Install T3 Code](./install.md).
+OMP, see [OMP](./providers-omp.md). For first-time setup, see [Install T3 Code](./install.md).
 
 Common reasons to add a Pi provider:
 

@@ -1,8 +1,8 @@
 # Codex
 
 This guide is for people who want to use more than one Codex account in T3 Code. For Claude, see
-[Claude](./providers-claude.md). For Pi, see [Pi](./providers-pi.md). For first-time setup, see
-[Install T3 Code](./install.md).
+[Claude](./providers-claude.md). For Pi, see [Pi](./providers-pi.md). For OMP, see
+[OMP](./providers-omp.md). For first-time setup, see [Install T3 Code](./install.md).
 
 Common reasons:
 
