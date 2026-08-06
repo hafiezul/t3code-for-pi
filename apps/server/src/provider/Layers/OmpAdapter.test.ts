@@ -21,6 +21,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { ServerConfig } from "../../config.ts";
@@ -33,7 +34,8 @@ import {
   resolveOmpApprovalMode,
   resolveOmpLaunchArgs,
   splitOmpModelSlug,
-  type OmpResumeCursor,
+  OmpResumeCursor,
+  type OmpResumeCursor as OmpResumeCursorType,
 } from "./OmpAdapter.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { ProviderAdapterRequestError } from "../Errors.ts";
@@ -332,6 +334,81 @@ describe("mapOmpEvent", () => {
     ]);
     expect(mapOmpEvent({ type: "turn_end" }, baseInput)).toEqual([]);
   });
+
+  it("tolerates start/end-only assistant streams (zero deltas)", () => {
+    // opencode-go streams 36–40 deltas per turn; the anthropic gateway
+    // streams zero — the item must still open and complete (prototype
+    // NOTES #3).
+    expect(
+      mapOmpEvent({ type: "message_start", message: { role: "assistant" } }, baseInput),
+    ).toEqual([
+      {
+        turnId: turnId("t1"),
+        itemId: "msg-1",
+        type: "item.started",
+        payload: {
+          itemType: "assistant_message",
+          status: "inProgress",
+          title: "Assistant message",
+          data: { type: "message_start", message: { role: "assistant" } },
+        },
+      },
+    ]);
+    expect(
+      mapOmpEvent(
+        { type: "message_end", message: { role: "assistant", content: "done" } },
+        baseInput,
+      ),
+    ).toEqual([
+      {
+        turnId: turnId("t1"),
+        itemId: "msg-1",
+        type: "item.completed",
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          title: "Assistant message",
+          detail: "done",
+          data: { type: "message_end", message: { role: "assistant", content: "done" } },
+        },
+      },
+    ]);
+  });
+
+  it("never re-renders the agent_end.messages snapshot", () => {
+    expect(
+      mapOmpEvent(
+        {
+          type: "agent_end",
+          isTerminal: true,
+          messages: [{ role: "assistant", content: [{ type: "text", text: "already rendered" }] }],
+        },
+        baseInput,
+      ),
+    ).toEqual([]);
+  });
+});
+
+describe("OmpResumeCursor round-trip", () => {
+  it("survives schema encode/decode with optional fields preserved", () => {
+    const cursor: OmpResumeCursorType = {
+      schemaVersion: 1,
+      sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+      sessionId: "thread-1",
+      turnBoundaries: ["u1", "u2"],
+    };
+    const encoded = Schema.encodeSync(OmpResumeCursor)(cursor);
+    const decoded = Schema.decodeSync(OmpResumeCursor)(encoded);
+    expect(decoded).toEqual(cursor);
+  });
+
+  it("round-trips a minimal cursor and omits absent optional fields", () => {
+    const cursor: OmpResumeCursorType = { schemaVersion: 1, sessionFile: "/tmp/x.jsonl" };
+    const encoded = Schema.encodeSync(OmpResumeCursor)(cursor);
+    expect("sessionId" in encoded).toBe(false);
+    expect("turnBoundaries" in encoded).toBe(false);
+    expect(Schema.decodeSync(OmpResumeCursor)(encoded)).toEqual(cursor);
+  });
 });
 
 // ── Integration: scripted omp process ──────────────────────────────────
@@ -373,11 +450,13 @@ const makeScriptedState = (handler: ScriptedOmpState["handler"]): Effect.Effect<
  * Fake ChildProcessSpawner that answers `omp --mode rpc` with a JSONL
  * round-trip: every command written to stdin is recorded on `observed` and
  * the handler's replies are streamed back on stdout. The `ready` hello is
- * offered at spawn (the client gates its first command on it).
+ * offered at spawn (the client gates its first command on it); a custom
+ * frame can be supplied to exercise protocol negotiation paths.
  */
 const makeScriptedSpawner = (
   state: ScriptedOmpState,
   onSpawn?: (args: ReadonlyArray<string>, options: ChildProcess.CommandOptions) => void,
+  readyFrame: Record<string, unknown> = { type: "ready", protocolVersion: 2 },
 ) =>
   ChildProcessSpawner.make((command) =>
     Effect.gen(function* () {
@@ -385,7 +464,7 @@ const makeScriptedSpawner = (
         return yield* Effect.die(new Error("expected a standard omp command"));
       }
       onSpawn?.(command.args, command.options);
-      yield* Queue.offer(state.output, Buffer.from(`{"type":"ready","protocolVersion":2}\n`));
+      yield* Queue.offer(state.output, Buffer.from(`${JSON.stringify(readyFrame)}\n`));
       const stdin = Sink.forEach((chunk: Uint8Array) =>
         Effect.gen(function* () {
           const text = Buffer.from(chunk).toString("utf8").trim();
@@ -619,7 +698,9 @@ describe("makeOmpAdapter — scripted RPC process", () => {
         sessionFile: "/tmp/t3/omp/sessions/x/forked-123.jsonl",
         sessionId: "forked-123",
       });
-      expect((live?.resumeCursor as OmpResumeCursor | undefined)?.turnBoundaries).toBeUndefined();
+      expect(
+        (live?.resumeCursor as OmpResumeCursorType | undefined)?.turnBoundaries,
+      ).toBeUndefined();
 
       yield* adapter.stopAll();
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
@@ -1373,6 +1454,550 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       // The session is gone from the adapter's view.
       expect(yield* adapter.hasSession(threadId)).toBe(false);
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("reports a code-0 self-exit as a graceful session end", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const exited = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { exited },
+        matches: (event) => (event.type === "session.exited" ? "exited" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      // Exit 0 = the stdin-EOF graceful path (prototype NOTES #10).
+      yield* Deferred.succeed(ChildProcessSpawner.ExitCode(0))(state.exitSignal);
+
+      yield* Deferred.await(exited);
+      const events = yield* Ref.get(collector.events);
+      const exitedEvent = events.find((event) => event.type === "session.exited");
+      expect(exitedEvent?.payload).toMatchObject({
+        reason: "OMP process exited (code 0).",
+        recoverable: true,
+        exitKind: "graceful",
+      });
+
+      expect(yield* adapter.hasSession(threadId)).toBe(false);
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect(
+    "negotiates protocol v2 before the first command when the ready hello advertises it",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "negotiate_protocol":
+              return [reply(command, { data: { protocolVersion: 2 } })];
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state, undefined, {
+          type: "ready",
+          protocolVersion: 1,
+          supportedProtocolVersions: [1, 2],
+        });
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        // The negotiation lands before the adapter's own first command.
+        const negotiation = yield* nextCommand(state);
+        expect(negotiation.type).toBe("negotiate_protocol");
+        expect(negotiation.protocolVersion).toBe(2);
+        expect((yield* nextCommand(state)).type).toBe("get_state");
+
+        yield* adapter.stopAll();
+      }),
+  );
+
+  it.effect("degrades to v1 when protocol-v2 negotiation is rejected", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "negotiate_protocol":
+            // A v1-only binary answers `success: false`; the session must
+            // proceed on v1 framing regardless.
+            return [
+              reply(command, { success: false, error: "Unknown command: negotiate_protocol" }),
+            ];
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state, undefined, {
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const session = yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      expect(session.status).toBe("ready");
+      const negotiation = yield* nextCommand(state);
+      expect(negotiation.type).toBe("negotiate_protocol");
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+
+      yield* adapter.stopAll();
+    }),
+  );
+
+  it.effect("falls back to v1 when protocol-v2 negotiation never answers", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "negotiate_protocol":
+            // No response line, ever: the negotiation must time out and the
+            // first command must proceed on v1 (and the timed-out pending
+            // entry must not block later commands).
+            return [];
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state, undefined, {
+        type: "ready",
+        protocolVersion: 1,
+        supportedProtocolVersions: [1, 2],
+      });
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const startFiber = yield* adapter
+        .startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.forkScoped);
+      // Deterministic signal that the negotiation is in flight: the command
+      // is on the wire, and its 5s response timeout is now a clock sleep.
+      expect((yield* nextCommand(state)).type).toBe("negotiate_protocol");
+      // Advance the TestClock (with scheduler hops so the racing timeout
+      // fiber registers its wakeup) until the negotiation timeout fires and
+      // the gated first command proceeds.
+      for (let attempt = 0; attempt < 600; attempt += 1) {
+        yield* TestClock.adjust("10 millis");
+        yield* Effect.yieldNow;
+      }
+      const session = yield* Fiber.join(startFiber).pipe(
+        Effect.timeoutOption("1 seconds"),
+        Effect.flatMap(
+          Option.match({
+            onNone: () =>
+              Effect.die(
+                new Error("omp session did not start after the protocol-v2 negotiation timeout"),
+              ),
+            onSome: (value) => Effect.succeed(value),
+          }),
+        ),
+      );
+      expect(session.status).toBe("ready");
+      expect((yield* nextCommand(state)).type).toBe("get_state");
+
+      yield* adapter.stopAll();
+    }),
+  );
+
+  it.effect("round-trips a >1 MiB agent event through the full pipeline", () =>
+    Effect.gen(function* () {
+      const delta = "x".repeat(1024 * 1024 + 64);
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "message_start", message: { role: "assistant" } },
+              { type: "message_update", assistantMessageEvent: { type: "text_delta", delta } },
+              { type: "message_end", message: { role: "assistant", content: "done" } },
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [
+              reply(command, {
+                data: { entries: [{ entryId: "u1", text: "hi" }] },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      yield* Deferred.await(settled);
+      const events = yield* Ref.get(collector.events);
+      const deltaEvent = events.find((event) => event.type === "content.delta");
+      const deltaPayload = deltaEvent?.payload as { delta: string } | undefined;
+      // The whole >1 MiB record survives framing, splitting, and parsing.
+      expect(deltaPayload?.delta.length).toBe(1024 * 1024 + 64);
+      expect(deltaPayload?.delta).toBe(delta);
+      expect(events.filter((event) => event.type === "item.started")).toHaveLength(1);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("never re-renders the agent_end.messages snapshot", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "Hi" },
+              },
+              { type: "message_end", message: { role: "assistant", content: "Hi" } },
+              {
+                type: "agent_end",
+                isTerminal: true,
+                messages: [{ role: "assistant", content: [{ type: "text", text: "Hi" }] }],
+              },
+            ];
+          case "get_branch_messages":
+            return [
+              reply(command, {
+                data: { entries: [{ entryId: "u1", text: "hi" }] },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      yield* Deferred.await(settled);
+      const events = yield* Ref.get(collector.events);
+      // Exactly the live stream rendered: one item, one delta, one
+      // completion — the agent_end.messages snapshot is never replayed.
+      expect(events.filter((event) => event.type === "item.started")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "content.delta")).toHaveLength(1);
+      expect(events.filter((event) => event.type === "item.completed")).toHaveLength(1);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("resumes a session across restarts via the resume cursor", () =>
+    Effect.gen(function* () {
+      const handler = (command: Record<string, unknown>) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_update",
+                assistantMessageEvent: { type: "text_delta", delta: "Hi" },
+              },
+              { type: "message_end", message: { role: "assistant", content: "Hi" } },
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [
+              reply(command, {
+                data: { entries: [{ entryId: "u1", text: "hi" }] },
+              }),
+            ];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      };
+      const state = yield* makeScriptedState(handler);
+      const spawnArgs: Array<ReadonlyArray<string>> = [];
+      const startInput = {
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      } as const;
+
+      // Adapter A: fresh launch (no cursor), one settled turn.
+      const adapterA = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(makeScriptedSpawner(state, (args) => spawnArgs.push(args)))),
+      );
+      const settledA = yield* Deferred.make<undefined>();
+      const collectorA = yield* collectEventsUntil({
+        stream: adapterA.streamEvents,
+        signals: { settledA },
+        matches: (event) => (event.type === "turn.completed" ? "settledA" : undefined),
+      });
+
+      yield* adapterA.startSession(startInput);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* adapterA.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+      yield* Deferred.await(settledA);
+      // Boundary recorded after the settle.
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+      // The recorder updates the cursor ref after its response round trip —
+      // bounded yield-now poll for the durable boundary to land.
+      let cursor: OmpResumeCursorType | undefined;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const sessions = yield* adapterA.listSessions();
+        const live = sessions.find((entry) => entry.threadId === threadId);
+        cursor = live?.resumeCursor as OmpResumeCursorType | undefined;
+        if (cursor?.turnBoundaries?.length === 1) {
+          break;
+        }
+        yield* Effect.yieldNow;
+      }
+      expect(cursor?.sessionFile).toBe("/tmp/t3/omp/sessions/x/thread-1.jsonl");
+      expect(cursor?.turnBoundaries).toEqual(["u1"]);
+      // Fresh launch: no --resume flag.
+      expect(spawnArgs[0]).not.toContain("--resume");
+
+      yield* adapterA.stopAll();
+      yield* Fiber.interrupt(collectorA.fiber).pipe(Effect.ignore);
+      // A's stop path best-effort aborts the child; drain it so B's
+      // command stream starts clean.
+      expect((yield* nextCommand(state)).type).toBe("abort");
+
+      // Adapter B: same thread, resumed from the persisted cursor.
+      const adapterB = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(makeScriptedSpawner(state, (args) => spawnArgs.push(args)))),
+      );
+      const settledB = yield* Deferred.make<undefined>();
+      const collectorB = yield* collectEventsUntil({
+        stream: adapterB.streamEvents,
+        signals: { settledB },
+        matches: (event) => (event.type === "turn.completed" ? "settledB" : undefined),
+      });
+
+      yield* adapterB.startSession({ ...startInput, resumeCursor: cursor });
+      const resumedArgs = spawnArgs[1]!;
+      expect(resumedArgs[resumedArgs.indexOf("--resume") + 1]).toBe(cursor!.sessionFile);
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+      yield* adapterB.sendTurn({
+        threadId,
+        input: "again",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      const promptCommand = yield* nextCommand(state);
+      expect(promptCommand.type).toBe("prompt");
+      expect(promptCommand.message).toBe("again");
+      yield* Deferred.await(settledB);
+
+      yield* adapterB.stopAll();
+      yield* Fiber.interrupt(collectorB.fiber).pipe(Effect.ignore);
     }),
   );
 });

@@ -1267,7 +1267,14 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
           const turnId = context.activeTurnId;
           context.activeTurnId = undefined;
           context.activeTurnError = undefined;
-          const message = `OMP process exited unexpectedly (code ${Number(code)}).`;
+          // Exit 0 is the stdin-EOF graceful path (prototype NOTES #10):
+          // omp disposed and exited cleanly on its own. Anything else —
+          // 143 is signal death on macOS, other codes are crashes — is an
+          // error exit. Either way the live turn is dead and must fail.
+          const graceful = Number(code) === 0;
+          const message = graceful
+            ? "OMP process exited (code 0)."
+            : `OMP process exited unexpectedly (code ${Number(code)}).`;
           if (turnId !== undefined) {
             yield* emit({
               ...(yield* buildEventBase({ threadId: context.threadId, turnId })),
@@ -1292,7 +1299,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
             payload: {
               reason: message,
               recoverable: true,
-              exitKind: "error",
+              exitKind: graceful ? "graceful" : "error",
             },
           }).pipe(Effect.ignore);
           // Fail any command in flight so its caller observes the death

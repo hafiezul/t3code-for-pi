@@ -46,6 +46,9 @@ import { ChildProcessSpawner } from "effect/unstable/process";
 /** Default ceiling for a command's response round trip. */
 export const OMP_COMMAND_TIMEOUT_MS = 30_000;
 
+/** Ceiling for the best-effort protocol-v2 negotiation round trip. */
+const OMP_NEGOTIATE_TIMEOUT_MS = 5_000;
+
 /** One parsed stdout line that is not a command response (an agent event). */
 export type OmpRpcEvent = Record<string, unknown> & { readonly type: string };
 
@@ -154,6 +157,16 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
   );
   const stoppedRef = yield* Ref.make(false);
   const readyGate = yield* Deferred.make<undefined>();
+  /** Protocol facts from the `ready` hello, captured the moment it lands. */
+  const readyRef = yield* Ref.make<
+    | {
+        readonly protocolVersion: number | undefined;
+        readonly supportedProtocolVersions: ReadonlyArray<number> | undefined;
+      }
+    | undefined
+  >(undefined);
+  /** One-shot: protocol-v2 negotiation attempted (or ruled out) at most once. */
+  const negotiatedRef = yield* Ref.make(false);
   const events = yield* Queue.unbounded<OmpRpcEvent>();
   const writePermit = yield* Semaphore.make(1);
 
@@ -176,6 +189,32 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
       return next;
     });
 
+  /**
+   * Stamp a correlation id and register the awaiting deferred — the shared
+   * bookkeeping behind every correlated write (`send` and the protocol
+   * negotiation). Callers own the id's cleanup (`dropPending`).
+   */
+  const registerPendingCommand = (commandName: string) =>
+    Effect.gen(function* () {
+      const id = yield* crypto.randomUUIDv4.pipe(
+        Effect.mapError(
+          (cause) =>
+            new OmpRpcCommandError({
+              command: commandName,
+              detail: "Failed to generate omp RPC request id.",
+              cause,
+            }),
+        ),
+      );
+      const deferred = yield* Deferred.make<OmpRpcResponse, OmpRpcCommandError>();
+      yield* Ref.update(pendingRef, (pending) => {
+        const next = new Map(pending);
+        next.set(id, deferred);
+        return next;
+      });
+      return { id, deferred } as const;
+    });
+
   const writeCommand = (payload: Record<string, unknown>) =>
     Stream.run(
       Stream.encodeText(Stream.make(`${JSON.stringify(payload)}\n`)),
@@ -190,6 +229,55 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
           }),
       ),
     );
+
+  /**
+   * Best-effort protocol-v2 opt-in (ADR 0001 d.6). When the `ready` hello
+   * reports a v1 server that advertises protocol 2, negotiate once before
+   * the first command so OMP may emit >1 MiB frames (v2 reassembly). Our
+   * JSONL splitter is unbounded, so v1 framing already handles any line
+   * size — this is a polite opt-in, never a requirement. Rejected,
+   * unanswered, or unadvertised negotiations fall back to v1 silently.
+   * Runs inside the caller's `writePermit`, so write ordering stays
+   * deterministic: the negotiation always precedes the first command.
+   */
+  const negotiateProtocolV2 = Effect.gen(function* () {
+    if (yield* Ref.get(negotiatedRef)) {
+      return;
+    }
+    yield* Ref.set(negotiatedRef, true);
+    const ready = yield* Ref.get(readyRef);
+    if (ready === undefined || (ready.protocolVersion ?? 1) >= 2) {
+      return;
+    }
+    const supported = ready.supportedProtocolVersions;
+    if (supported === undefined || !supported.includes(2)) {
+      return;
+    }
+    const { id, deferred } = yield* registerPendingCommand("negotiate_protocol");
+    yield* writeCommand({ type: "negotiate_protocol", protocolVersion: 2, id }).pipe(
+      Effect.andThen(
+        Deferred.await(deferred).pipe(
+          Effect.timeoutOption(Duration.millis(OMP_NEGOTIATE_TIMEOUT_MS)),
+          Effect.flatMap((option) =>
+            Option.match(option, {
+              onNone: () => Effect.logDebug("omp protocol-v2 negotiation timed out; staying on v1"),
+              onSome: (response) =>
+                response.success
+                  ? Effect.logDebug("omp protocol-v2 negotiated")
+                  : Effect.logDebug("omp declined protocol-v2 negotiation; staying on v1", {
+                      error: response.error,
+                    }),
+            }).pipe(Effect.andThen(dropPending(id))),
+          ),
+        ),
+      ),
+      Effect.onInterrupt(() => dropPending(id)),
+      Effect.onError(() => dropPending(id)),
+      // Best-effort: a rejected or failed negotiation must never fail the
+      // caller's command — v1 framing already handles any line size.
+      Effect.ignoreCause,
+    );
+  });
 
   // Reader fiber: stdout lines → responses resolve pending commands,
   // everything else is an agent event. Runs for the client's lifetime.
@@ -206,6 +294,18 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
         }
         const record = parsed as Record<string, unknown>;
         if (record.type === "ready") {
+          yield* Ref.set(readyRef, {
+            ...(typeof record.protocolVersion === "number"
+              ? { protocolVersion: record.protocolVersion }
+              : { protocolVersion: undefined }),
+            ...(Array.isArray(record.supportedProtocolVersions)
+              ? {
+                  supportedProtocolVersions: record.supportedProtocolVersions.filter(
+                    (value): value is number => typeof value === "number",
+                  ),
+                }
+              : { supportedProtocolVersions: undefined }),
+          });
           yield* Deferred.succeed(undefined)(readyGate).pipe(Effect.ignore);
           return;
         }
@@ -263,23 +363,8 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
           detail: "omp process is stopped.",
         });
       }
-      const id = yield* crypto.randomUUIDv4.pipe(
-        Effect.mapError(
-          (cause) =>
-            new OmpRpcCommandError({
-              command: String(command.type ?? "rpc"),
-              detail: "Failed to generate omp RPC request id.",
-              cause,
-            }),
-        ),
-      );
-      const deferred = yield* Deferred.make<OmpRpcResponse, OmpRpcCommandError>();
-      yield* Ref.update(pendingRef, (pending) => {
-        const next = new Map(pending);
-        next.set(id, deferred);
-        return next;
-      });
       const name = String(command.type ?? "rpc");
+      const { id, deferred } = yield* registerPendingCommand(name);
       const result = yield* writePermit
         .withPermit(
           // OMP rejects commands sent before its `ready` hello — gate the
@@ -287,6 +372,7 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
           // process dies without ever greeting (scope close resolves it
           // as a failed read: the reader fiber dies with the process).
           Deferred.await(readyGate).pipe(
+            Effect.andThen(negotiateProtocolV2),
             Effect.andThen(
               writeCommand({ ...command, id }).pipe(
                 Effect.andThen(
@@ -334,8 +420,14 @@ export const makeOmpRpcClient = Effect.fn("makeOmpRpcClient")(function* (input: 
       // No correlation id, no pending entry, no await — the command goes on
       // the wire exactly as given (its `id` field belongs to OMP's dialog
       // bookkeeping, not ours). Writes stay serialized with `send` via the
-      // shared permit.
-      yield* writePermit.withPermit(writeCommand(command));
+      // shared permit, and the `ready` gate applies here too: no command
+      // (correlated or not) may precede the hello.
+      yield* writePermit.withPermit(
+        Deferred.await(readyGate).pipe(
+          Effect.andThen(negotiateProtocolV2),
+          Effect.andThen(writeCommand(command)),
+        ),
+      );
     });
 
   return {
