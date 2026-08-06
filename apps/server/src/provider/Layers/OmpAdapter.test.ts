@@ -2747,4 +2747,598 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       yield* Fiber.interrupt(collectorB.fiber).pipe(Effect.ignore);
     }),
   );
+
+  it.effect(
+    "applies a mid-thread model change via set_model on the next turn without restarting",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "set_model":
+              return [reply(command)];
+            case "prompt":
+              return [
+                reply(command, { data: { agentInvoked: true } }),
+                { type: "message_start", message: { role: "assistant" } },
+                { type: "message_end", message: { role: "assistant", content: "Hi" } },
+                { type: "agent_end", isTerminal: true },
+              ];
+            case "get_branch_messages":
+              return [reply(command, { data: { entries: [] } })];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        let spawnCount = 0;
+        const spawner = makeScriptedSpawner(state, () => {
+          spawnCount += 1;
+        });
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+        let completedTurns = 0;
+        const settled = yield* Deferred.make<undefined>();
+        const settledAgain = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled, settledAgain },
+          matches: (event) => {
+            if (event.type === "turn.completed") {
+              completedTurns += 1;
+              return completedTurns === 1
+                ? "settled"
+                : completedTurns === 2
+                  ? "settledAgain"
+                  : undefined;
+            }
+            return undefined;
+          },
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        // The picker change lands as set_model on the next turn, before the
+        // prompt — same process, no restart.
+        yield* adapter.sendTurn({
+          threadId,
+          input: "switch me",
+          modelSelection: { instanceId, model: "anthropic/claude-opus-4-8" },
+        });
+        const setModel = yield* nextCommand(state);
+        expect(setModel).toMatchObject({
+          type: "set_model",
+          provider: "anthropic",
+          modelId: "claude-opus-4-8",
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+        yield* Deferred.await(settled);
+        expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+        const events = yield* Ref.get(collector.events);
+        const started = events.find((event) => event.type === "turn.started");
+        expect(started?.payload).toMatchObject({ model: "anthropic/claude-opus-4-8" });
+        expect(events.some((event) => event.type === "runtime.warning")).toBe(false);
+        const sessions = yield* adapter.listSessions();
+        expect(sessions.find((entry) => entry.threadId === threadId)?.model).toBe(
+          "anthropic/claude-opus-4-8",
+        );
+        expect(spawnCount).toBe(1);
+
+        // A turn on the already-applied model sends no set_model.
+        yield* adapter.sendTurn({
+          threadId,
+          input: "again",
+          modelSelection: { instanceId, model: "anthropic/claude-opus-4-8" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+        yield* Deferred.await(settledAgain);
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect(
+    "surfaces a rejected model switch, keeps the old model, and retries on the next turn",
+    () =>
+      Effect.gen(function* () {
+        let setModelCalls = 0;
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "set_model":
+              setModelCalls += 1;
+              return setModelCalls === 1
+                ? [
+                    reply(command, {
+                      success: false,
+                      error: "model 'anthropic/claude-opus-4-8' is not configured",
+                    }),
+                  ]
+                : [reply(command)];
+            case "prompt":
+              return [
+                reply(command, { data: { agentInvoked: true } }),
+                { type: "agent_end", isTerminal: true },
+              ];
+            case "get_branch_messages":
+              return [reply(command, { data: { entries: [] } })];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(makeScriptedSpawner(state))),
+        );
+        let completedTurns = 0;
+        const settled = yield* Deferred.make<undefined>();
+        const settledAgain = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled, settledAgain },
+          matches: (event) => {
+            if (event.type === "turn.completed") {
+              completedTurns += 1;
+              return completedTurns === 1
+                ? "settled"
+                : completedTurns === 2
+                  ? "settledAgain"
+                  : undefined;
+            }
+            return undefined;
+          },
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        // Turn 1: OMP rejects the switch — notice surfaces, the turn proceeds
+        // on the old model, and the session bookkeeping keeps the old model.
+        yield* adapter.sendTurn({
+          threadId,
+          input: "keep going",
+          modelSelection: { instanceId, model: "anthropic/claude-opus-4-8" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("set_model");
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+        yield* Deferred.await(settled);
+        expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+        let events = yield* Ref.get(collector.events);
+        const warning = events.find((event) => event.type === "runtime.warning");
+        expect(warning?.payload).toMatchObject({
+          message: expect.stringContaining("could not switch to model 'anthropic/claude-opus-4-8'"),
+        });
+        expect(warning?.payload).toMatchObject({
+          message: expect.stringContaining("The previous model stays active."),
+        });
+        // Neither the session nor turn.started may claim the rejected model.
+        let sessions = yield* adapter.listSessions();
+        expect(sessions.find((entry) => entry.threadId === threadId)?.model).toBe(
+          "opencode-go/deepseek-v4-flash",
+        );
+        const started = events.find((event) => event.type === "turn.started");
+        expect(started?.payload).toEqual({});
+
+        // Turn 2: picker still on the rejected model — the switch is retried
+        // instead of being silently dropped, and now lands.
+        yield* adapter.sendTurn({
+          threadId,
+          input: "try again",
+          modelSelection: { instanceId, model: "anthropic/claude-opus-4-8" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("set_model");
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+        yield* Deferred.await(settledAgain);
+        expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+        sessions = yield* adapter.listSessions();
+        expect(sessions.find((entry) => entry.threadId === threadId)?.model).toBe(
+          "anthropic/claude-opus-4-8",
+        );
+        expect(setModelCalls).toBe(2);
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect("applies a thinking-tier change via set_thinking_level on the next turn", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "set_thinking_level":
+            return [reply(command)];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [reply(command, { data: { entries: [] } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(makeScriptedSpawner(state))),
+      );
+      let completedTurns = 0;
+      const settled = yield* Deferred.make<undefined>();
+      const settledAgain = yield* Deferred.make<undefined>();
+      const settledThird = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled, settledAgain, settledThird },
+        matches: (event) => {
+          if (event.type === "turn.completed") {
+            completedTurns += 1;
+            return completedTurns === 1
+              ? "settled"
+              : completedTurns === 2
+                ? "settledAgain"
+                : completedTurns === 3
+                  ? "settledThird"
+                  : undefined;
+          }
+          return undefined;
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      // Tier picked for the first time — set_thinking_level lands before the prompt.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "think hard",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "high" }],
+        },
+      });
+      const levelCommand = yield* nextCommand(state);
+      expect(levelCommand).toMatchObject({ type: "set_thinking_level", level: "high" });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settled);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      // Same tier on the next turn — no set_thinking_level.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "still high",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "high" }],
+        },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledAgain);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      // New tier — set_thinking_level again.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "max it",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "max" }],
+        },
+      });
+      expect(yield* nextCommand(state)).toMatchObject({
+        type: "set_thinking_level",
+        level: "max",
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledThird);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("keeps the applied thinking tier across turns without a tier selection", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "set_thinking_level":
+            return [reply(command)];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [reply(command, { data: { entries: [] } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(makeScriptedSpawner(state))),
+      );
+      let completedTurns = 0;
+      const settled = yield* Deferred.make<undefined>();
+      const settledAgain = yield* Deferred.make<undefined>();
+      const settledThird = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled, settledAgain, settledThird },
+        matches: (event) => {
+          if (event.type === "turn.completed") {
+            completedTurns += 1;
+            return completedTurns === 1
+              ? "settled"
+              : completedTurns === 2
+                ? "settledAgain"
+                : completedTurns === 3
+                  ? "settledThird"
+                  : undefined;
+          }
+          return undefined;
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      // Turn 1: tier applied.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "think",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "high" }],
+        },
+      });
+      expect(yield* nextCommand(state)).toMatchObject({
+        type: "set_thinking_level",
+        level: "high",
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settled);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      // Turn 2: no tier in the selection (e.g. a model without a tier) —
+      // must not clear the applied tier.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "no tier here",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledAgain);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      // Turn 3: same tier as turn 1 — still applied, no re-send.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "think again",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "high" }],
+        },
+      });
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledThird);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("surfaces a rejected thinking-tier change and retries it on the next turn", () =>
+    Effect.gen(function* () {
+      let levelCalls = 0;
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "set_thinking_level":
+            levelCalls += 1;
+            return levelCalls === 1
+              ? [
+                  reply(command, {
+                    success: false,
+                    error: "level 'max' is unsupported by the current model",
+                  }),
+                ]
+              : [reply(command)];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              { type: "agent_end", isTerminal: true },
+            ];
+          case "get_branch_messages":
+            return [reply(command, { data: { entries: [] } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(makeScriptedSpawner(state))),
+      );
+      let completedTurns = 0;
+      const settled = yield* Deferred.make<undefined>();
+      const settledAgain = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled, settledAgain },
+        matches: (event) => {
+          if (event.type === "turn.completed") {
+            completedTurns += 1;
+            return completedTurns === 1
+              ? "settled"
+              : completedTurns === 2
+                ? "settledAgain"
+                : undefined;
+          }
+          return undefined;
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      // Turn 1: rejected — notice surfaces, the turn proceeds on the old tier.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "think",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "max" }],
+        },
+      });
+      expect((yield* nextCommand(state)).type).toBe("set_thinking_level");
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settled);
+      expect((yield* nextCommand(state)).type).toBe("get_branch_messages");
+
+      const events = yield* Ref.get(collector.events);
+      const warning = events.find((event) => event.type === "runtime.warning");
+      expect(warning?.payload).toMatchObject({
+        message: expect.stringContaining("could not set thinking level 'max'"),
+      });
+      expect(warning?.payload).toMatchObject({
+        message: expect.stringContaining("The previous level stays active."),
+      });
+
+      // Turn 2: same tier — retried, and now accepted.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "think again",
+        modelSelection: {
+          instanceId,
+          model: "opencode-go/deepseek-v4-flash",
+          options: [{ id: "thinkingLevel", value: "max" }],
+        },
+      });
+      expect((yield* nextCommand(state)).type).toBe("set_thinking_level");
+      expect((yield* nextCommand(state)).type).toBe("prompt");
+      yield* Deferred.await(settledAgain);
+      expect(levelCalls).toBe(2);
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
 });

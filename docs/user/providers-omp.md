@@ -72,7 +72,8 @@ that support thinking get a tier selector for the tiers OMP actually exposes for
 
 You can change the picked model while a thread is running — the change applies on the **next
 turn**, no restart, no context loss. If OMP rejects the new model, T3 Code shows a notice and the
-session continues on the previous model.
+session continues on the previous model. The thinking-tier selector works the same way: pick a new
+tier mid-thread and it applies on the next turn.
 
 ## Permissions
 

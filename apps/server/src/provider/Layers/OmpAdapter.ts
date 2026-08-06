@@ -1658,11 +1658,15 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
 
       // Mid-thread model switch: `set_model` applies on the next turn with
       // no session restart. A rejected switch surfaces a notice and the
-      // turn proceeds on the old model.
+      // turn proceeds on the old model — the session keeps the old model
+      // (and the turn claims it), so the next turn with the picker still on
+      // the new model retries the switch instead of silently dropping it.
+      const previousModel = context.session.model;
+      let modelSwitchApplied = true;
       if (
         modelSelection !== undefined &&
-        context.session.model !== undefined &&
-        modelSelection.model !== context.session.model
+        previousModel !== undefined &&
+        modelSelection.model !== previousModel
       ) {
         const parsed = splitOmpModelSlug(modelSelection.model);
         yield* context.client
@@ -1672,8 +1676,43 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
             modelId: parsed.modelId,
           })
           .pipe(
-            Effect.catch((cause) =>
-              buildEventBase({
+            Effect.matchEffect({
+              onSuccess: () => Effect.void,
+              onFailure: (error) => {
+                modelSwitchApplied = false;
+                return buildEventBase({
+                  threadId: input.threadId,
+                  turnId,
+                }).pipe(
+                  Effect.flatMap((base) =>
+                    emit({
+                      ...base,
+                      type: "runtime.warning",
+                      payload: {
+                        message: `OMP could not switch to model '${modelSelection.model}': ${error.detail}. The previous model stays active.`,
+                      },
+                    }),
+                  ),
+                  Effect.ignore,
+                );
+              },
+            }),
+          );
+      }
+
+      // Thinking-tier switch: `set_thinking_level` applies on the next turn.
+      // On rejection the previous level stays recorded, so a later turn with
+      // the same picker tier retries the switch.
+      const thinkingLevel = getModelSelectionStringOptionValue(modelSelection, "thinkingLevel");
+      const previousThinkingLevel = yield* Ref.get(context.lastThinkingLevelRef);
+      let thinkingSwitchApplied = true;
+      if (thinkingLevel !== undefined && thinkingLevel !== previousThinkingLevel) {
+        yield* context.client.send({ type: "set_thinking_level", level: thinkingLevel }).pipe(
+          Effect.matchEffect({
+            onSuccess: () => Effect.void,
+            onFailure: (error) => {
+              thinkingSwitchApplied = false;
+              return buildEventBase({
                 threadId: input.threadId,
                 turnId,
               }).pipe(
@@ -1682,41 +1721,17 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
                     ...base,
                     type: "runtime.warning",
                     payload: {
-                      message: `OMP could not switch to model '${modelSelection.model}': ${cause.detail}. The previous model stays active.`,
+                      message: `OMP could not set thinking level '${thinkingLevel}': ${error.detail}. The previous level stays active.`,
                     },
                   }),
                 ),
                 Effect.ignore,
-              ),
-            ),
-          );
-      }
-
-      // Thinking-tier switch: `set_thinking_level` applies on the next turn.
-      const thinkingLevel = getModelSelectionStringOptionValue(modelSelection, "thinkingLevel");
-      if (
-        thinkingLevel !== undefined &&
-        thinkingLevel !== (yield* Ref.get(context.lastThinkingLevelRef))
-      ) {
-        yield* context.client.send({ type: "set_thinking_level", level: thinkingLevel }).pipe(
-          Effect.catch((cause) =>
-            buildEventBase({
-              threadId: input.threadId,
-              turnId,
-            }).pipe(
-              Effect.flatMap((base) =>
-                emit({
-                  ...base,
-                  type: "runtime.warning",
-                  payload: {
-                    message: `OMP could not set thinking level '${thinkingLevel}': ${cause.detail}. The previous level stays active.`,
-                  },
-                }),
-              ),
-              Effect.ignore,
-            ),
-          ),
+              );
+            },
+          }),
         );
+      }
+      if (thinkingSwitchApplied && thinkingLevel !== undefined) {
         yield* Ref.set(context.lastThinkingLevelRef, thinkingLevel);
       }
 
@@ -1728,7 +1743,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         {
           status: "running",
           activeTurnId: turnId,
-          ...(modelSelection ? { model: modelSelection.model } : {}),
+          ...(modelSelection && modelSwitchApplied ? { model: modelSelection.model } : {}),
         },
         { clearLastError: true },
       );
@@ -1737,7 +1752,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         yield* emit({
           ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
           type: "turn.started",
-          payload: modelSelection ? { model: modelSelection.model } : {},
+          payload: modelSelection && modelSwitchApplied ? { model: modelSelection.model } : {},
         });
       }
 
@@ -1769,7 +1784,9 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
                   context,
                   {
                     status: "ready",
-                    ...(modelSelection ? { model: modelSelection.model } : {}),
+                    ...(modelSelection && modelSwitchApplied
+                      ? { model: modelSelection.model }
+                      : {}),
                     lastError: requestError.detail,
                   },
                   { clearActiveTurnId: true },
