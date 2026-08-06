@@ -1955,14 +1955,18 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
       context.pendingApprovals.delete(requestId);
       // ADR 0001 decision 4: `acceptForSession` has no OMP equivalent
       // (approval mode is a launch flag) and maps to a single Approve.
-      const value = decision === "decline" ? "Deny" : "Approve";
+      // `cancel` (the web "Cancel turn" button) must never grant the tool:
+      // OMP's dialog only speaks Approve/Deny, so it maps to Deny and the
+      // original decision still rides the `request.resolved` payload.
+      const value = decision === "accept" || decision === "acceptForSession" ? "Approve" : "Deny";
       yield* answerExtensionUi(context, String(requestId), value).pipe(
         Effect.mapError((cause) => mapOmpRequestError("thread/approval", cause)),
       );
-      if (decision === "decline") {
-        // The model may retry the tool after a Deny — auto-answer any
-        // further approval dialogs this turn instead of stalling the turn
-        // on more dialogs (prototype NOTES #6).
+      if (decision === "decline" || decision === "cancel") {
+        // The model may retry the tool after a Deny (or a cancel, which
+        // also denies) — auto-answer any further approval dialogs this
+        // turn instead of stalling the turn on more dialogs (prototype
+        // NOTES #6).
         yield* Ref.set(context.denyPendingSelects, true);
       }
       yield* emit({
@@ -1997,6 +2001,15 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
       context.pendingUiRequests.delete(requestId);
       const answer = answers[requestId];
       const selected = Array.isArray(answer) ? answer[0] : answer;
+      // extension_ui_response is fire-and-forget on OMP's side (the dialog
+      // resolves and no response line ever comes), and the id must stay
+      // OMP's dialog id — so this cannot go through `send`, which stamps
+      // its own correlation id and awaits a reply that never arrives.
+      const sendResponse = (payload: Record<string, unknown>) =>
+        context.client
+          .sendFireAndForget({ type: "extension_ui_response", id: String(requestId), ...payload })
+          .pipe(Effect.mapError((cause) => mapOmpRequestError("extension_ui_response", cause)));
+
       if (request.method === "select") {
         if (typeof selected !== "string") {
           return yield* new ProviderAdapterRequestError({
@@ -2005,27 +2018,36 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
             detail: "OMP select dialogs require exactly one answer.",
           });
         }
-        yield* answerExtensionUi(context, String(requestId), selected);
-        return;
+        yield* sendResponse({ value: selected });
+      } else if (request.method === "confirm") {
+        yield* sendResponse({ confirmed: selected === "Yes" });
+      } else {
+        // input / editor: non-empty value answers only (empty = unanswered,
+        // matches the custom-answer machinery — the client blocks empty
+        // submits; this is the server-side backstop).
+        if (typeof selected !== "string" || selected.trim().length === 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "extension_ui_response",
+            detail: "OMP text dialogs require a non-empty answer.",
+          });
+        }
+        yield* sendResponse({ value: selected });
       }
-      if (request.method === "confirm") {
-        const confirmed = selected === "Yes";
-        yield* context.client
-          .sendFireAndForget({ type: "extension_ui_response", id: String(requestId), confirmed })
-          .pipe(Effect.mapError((cause) => mapOmpRequestError("extension_ui_response", cause)));
-        return;
-      }
-      // input / editor: non-empty value answers only (empty = unanswered,
-      // matches the custom-answer machinery — the client blocks empty
-      // submits; this is the server-side backstop).
-      if (typeof selected !== "string" || selected.trim().length === 0) {
-        return yield* new ProviderAdapterRequestError({
-          provider: PROVIDER,
-          method: "extension_ui_response",
-          detail: "OMP text dialogs require a non-empty answer.",
-        });
-      }
-      yield* answerExtensionUi(context, String(requestId), selected);
+
+      // Close the T3-side question card: web and mobile derive open cards
+      // from activities, and the projected pending count reads the same
+      // stream, so a successful answer must resolve the request exactly
+      // like the other adapters do.
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId: context.activeTurnId,
+          requestId,
+        })),
+        type: "user-input.resolved",
+        payload: { answers },
+      });
     });
 
   const readThread: ProviderAdapterShape<ProviderAdapterError>["readThread"] = (threadId) =>

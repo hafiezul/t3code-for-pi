@@ -1169,6 +1169,702 @@ describe("makeOmpAdapter — scripted RPC process", () => {
     }),
   );
 
+  it.effect(
+    "renders confirm/input/editor dialogs as questions and notify/setStatus as extension events",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "prompt":
+              // One turn that fires every non-approval extension-UI kind,
+              // plus the unsupported ones that must stay dropped.
+              return [
+                reply(command, { data: { agentInvoked: true } }),
+                {
+                  type: "extension_ui_request",
+                  id: "ui-confirm-1",
+                  method: "confirm",
+                  title: "Run dangerous command?",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-input-1",
+                  method: "input",
+                  title: "Enter a value",
+                  placeholder: "type something...",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-editor-1",
+                  method: "editor",
+                  title: "Edit some text",
+                  prefill: "Line 1\nLine 2",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-notify-1",
+                  method: "notify",
+                  message: "Command blocked by user",
+                  notifyType: "warning",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-status-1",
+                  method: "setStatus",
+                  statusKey: "my-ext",
+                  statusText: "Turn 3 running...",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-status-2",
+                  method: "setStatus",
+                  statusKey: "my-ext",
+                  // Omitted statusText = clear; the adapter normalizes to null.
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-widget-1",
+                  method: "setWidget",
+                  widgetKey: "w",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-title-1",
+                  method: "setTitle",
+                  title: "Session title",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-editor-text-1",
+                  method: "set_editor_text",
+                  text: "replacement",
+                },
+                {
+                  type: "extension_ui_request",
+                  id: "ui-url-1",
+                  method: "open_url",
+                  url: "https://example.test",
+                },
+                { type: "agent_end", isTerminal: true },
+              ];
+            case "get_branch_messages":
+              return [
+                reply(command, {
+                  data: { entries: [{ entryId: "u1", text: "hi" }] },
+                }),
+              ];
+            case "extension_ui_response":
+              // Fire-and-forget: no response line is ever sent back.
+              return [];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const uiRequested = yield* Deferred.make<undefined>();
+        const noticeSeen = yield* Deferred.make<undefined>();
+        const statusSeen = yield* Deferred.make<undefined>();
+        const resolved1 = yield* Deferred.make<undefined>();
+        const resolved2 = yield* Deferred.make<undefined>();
+        const resolved3 = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: {
+            settled,
+            uiRequested,
+            noticeSeen,
+            statusSeen,
+            resolved1,
+            resolved2,
+            resolved3,
+          },
+          matches: (event) => {
+            switch (event.type) {
+              case "turn.completed":
+              case "session.exited":
+                return "settled";
+              case "user-input.requested":
+                return "uiRequested";
+              case "extension.notice":
+                return "noticeSeen";
+              case "extension.status":
+                return "statusSeen";
+              case "user-input.resolved":
+                return event.requestId === "ui-confirm-1"
+                  ? "resolved1"
+                  : event.requestId === "ui-input-1"
+                    ? "resolved2"
+                    : "resolved3";
+              default:
+                return undefined;
+            }
+          },
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* nextCommand(state);
+        yield* nextCommand(state);
+
+        yield* adapter.sendTurn({
+          threadId,
+          input: "do the thing",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        });
+        expect((yield* nextCommand(state)).type).toBe("prompt");
+
+        yield* Deferred.await(uiRequested);
+        yield* Deferred.await(noticeSeen);
+        yield* Deferred.await(statusSeen);
+        // agent_end lands after every extension_ui_request in the script,
+        // so awaiting it guarantees all frames reached the collector.
+        yield* Deferred.await(settled);
+        const events = yield* Ref.get(collector.events);
+
+        const inputEvents = events.filter((event) => event.type === "user-input.requested");
+        expect(inputEvents).toHaveLength(3);
+        const questions = inputEvents.flatMap((event) =>
+          event.type === "user-input.requested" ? event.payload.questions : [],
+        );
+        expect(questions).toHaveLength(3);
+        expect(questions[0]).toMatchObject({
+          header: "OMP extension",
+          question: "Run dangerous command?",
+          options: [
+            { label: "Yes", description: "Confirm" },
+            { label: "No", description: "Cancel" },
+          ],
+          multiSelect: false,
+        });
+        expect(questions[1]).toMatchObject({
+          question: "Enter a value",
+          answerKind: "text",
+          placeholder: "type something...",
+          options: [],
+        });
+        expect(questions[2]).toMatchObject({
+          question: "Edit some text",
+          answerKind: "editor",
+          initialValue: "Line 1\nLine 2",
+          options: [],
+        });
+
+        const notice = events.find((event) => event.type === "extension.notice");
+        expect(notice).toBeDefined();
+        if (notice?.type !== "extension.notice") {
+          throw new Error("expected extension.notice");
+        }
+        expect(notice.payload).toEqual({
+          message: "Command blocked by user",
+          noticeType: "warning",
+        });
+
+        const statuses = events.filter((event) => event.type === "extension.status");
+        expect(statuses).toHaveLength(2);
+        if (statuses[0]?.type !== "extension.status" || statuses[1]?.type !== "extension.status") {
+          throw new Error("expected extension.status events");
+        }
+        expect(statuses[0].payload).toEqual({
+          statusKey: "my-ext",
+          statusText: "Turn 3 running...",
+        });
+        // Omitted statusText normalizes to an explicit null clear.
+        expect(statuses[1].payload).toEqual({ statusKey: "my-ext", statusText: null });
+
+        // setWidget / setTitle / set_editor_text / open_url stay dropped:
+        // no event for them, and nothing was written back for any of them.
+        expect(events.some((event) => event.type === "request.opened")).toBe(false);
+        expect(events.some((event) => event.type === "extension.notice")).toBe(true);
+
+        // Answer the confirm dialog: Yes/No maps onto {confirmed}.
+        const confirmRequestId = ApprovalRequestId.make(questions[0]!.id);
+        yield* adapter.respondToUserInput(threadId, confirmRequestId, {
+          [confirmRequestId]: "No",
+        });
+        let uiResponse = yield* nextCommand(state);
+        if (uiResponse.type === "get_branch_messages") {
+          uiResponse = yield* nextCommand(state);
+        }
+        expect(uiResponse.type).toBe("extension_ui_response");
+        expect(uiResponse.id).toBe("ui-confirm-1");
+        expect(uiResponse.confirmed).toBe(false);
+        yield* Deferred.await(resolved1);
+
+        // Answer the input dialog: a non-empty value is sent as {value}.
+        const inputRequestId = ApprovalRequestId.make(questions[1]!.id);
+        yield* adapter.respondToUserInput(threadId, inputRequestId, {
+          [inputRequestId]: "typed answer",
+        });
+        uiResponse = yield* nextCommand(state);
+        if (uiResponse.type === "get_branch_messages") {
+          uiResponse = yield* nextCommand(state);
+        }
+        expect(uiResponse.type).toBe("extension_ui_response");
+        expect(uiResponse.id).toBe("ui-input-1");
+        expect(uiResponse.value).toBe("typed answer");
+        expect(uiResponse.cancelled).toBeUndefined();
+        yield* Deferred.await(resolved2);
+
+        // Answer the editor dialog the same way.
+        const editorRequestId = ApprovalRequestId.make(questions[2]!.id);
+        yield* adapter.respondToUserInput(threadId, editorRequestId, {
+          [editorRequestId]: "edited text",
+        });
+        uiResponse = yield* nextCommand(state);
+        if (uiResponse.type === "get_branch_messages") {
+          uiResponse = yield* nextCommand(state);
+        }
+        expect(uiResponse.type).toBe("extension_ui_response");
+        expect(uiResponse.id).toBe("ui-editor-1");
+        expect(uiResponse.value).toBe("edited text");
+        yield* Deferred.await(resolved3);
+
+        // Every answer closed its T3-side card.
+        const resolvedEvents = (yield* Ref.get(collector.events)).filter(
+          (event) => event.type === "user-input.resolved",
+        );
+        expect(resolvedEvents).toHaveLength(3);
+        expect(resolvedEvents.map((event) => event.requestId)).toEqual([
+          "ui-confirm-1",
+          "ui-input-1",
+          "ui-editor-1",
+        ]);
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
+
+  it.effect("a cancel frame drops the pending request silently", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              {
+                type: "extension_ui_request",
+                id: "approval-1",
+                method: "select",
+                title: "Allow tool: bash",
+                options: ["Approve", "Deny"],
+              },
+            ];
+          case "extension_ui_response":
+            return [];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const opened = yield* Deferred.make<undefined>();
+      const dialog2Seen = yield* Deferred.make<undefined>();
+      const dialog3Seen = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { opened, dialog2Seen, dialog3Seen },
+        matches: (event) => {
+          if (event.type === "request.opened") {
+            return "opened";
+          }
+          if (event.type === "user-input.requested") {
+            // The FIFO markers: a marker dialog landing proves every
+            // earlier frame (including the cancels) was already handled by
+            // the pump.
+            const questionId = event.payload.questions[0]?.id;
+            return questionId === "dialog-3"
+              ? "dialog3Seen"
+              : questionId === "dialog-2"
+                ? "dialog2Seen"
+                : undefined;
+          }
+          return undefined;
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "approval-required",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      yield* Deferred.await(opened);
+
+      // Cancel the pending approval, then a fresh user-input dialog as the
+      // FIFO marker.
+      yield* Queue.offer(
+        state.output,
+        Buffer.from(
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            type: "extension_ui_request",
+            id: "approval-1",
+            method: "cancel",
+          }) + "\n",
+        ),
+      );
+      yield* Queue.offer(
+        state.output,
+        Buffer.from(
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            type: "extension_ui_request",
+            id: "dialog-2",
+            method: "select",
+            title: "Pick one",
+            options: ["A", "B"],
+          }) + "\n",
+        ),
+      );
+      yield* Deferred.await(dialog2Seen);
+
+      // The cancelled approval is gone: responding fails instead of
+      // approving, and nothing was ever written for it.
+      const respondExit = yield* adapter
+        .respondToRequest(threadId, ApprovalRequestId.make("approval-1"), "accept")
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(respondExit)).toBe(true);
+      if (Exit.isFailure(respondExit)) {
+        const error = Cause.squash(respondExit.cause) as ProviderAdapterRequestError;
+        expect(error.message).toMatch(/Unknown pending omp approval/);
+      }
+
+      // Cancel the STILL-PENDING user-input dialog the same way; dialog-3
+      // is the FIFO marker. (Order matters: cancelling an already-answered
+      // dialog would be a no-op on a non-pending id and prove nothing.)
+      yield* Queue.offer(
+        state.output,
+        Buffer.from(
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            type: "extension_ui_request",
+            id: "dialog-2",
+            method: "cancel",
+          }) + "\n",
+        ),
+      );
+      yield* Queue.offer(
+        state.output,
+        Buffer.from(
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            type: "extension_ui_request",
+            id: "dialog-3",
+            method: "select",
+            title: "Pick one",
+            options: ["A", "B"],
+          }) + "\n",
+        ),
+      );
+      yield* Deferred.await(dialog3Seen);
+
+      const inputExit = yield* adapter
+        .respondToUserInput(threadId, ApprovalRequestId.make("dialog-2"), { "dialog-2": "A" })
+        .pipe(Effect.exit);
+      expect(Exit.isFailure(inputExit)).toBe(true);
+      if (Exit.isFailure(inputExit)) {
+        const error = Cause.squash(inputExit.cause) as ProviderAdapterRequestError;
+        expect(error.message).toMatch(/Unknown pending omp user-input request/);
+      }
+
+      // The marker dialog is still answerable — and nothing was ever
+      // written for either cancelled request (the first write on the wire
+      // is dialog-3's answer).
+      yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("dialog-3"), {
+        "dialog-3": "B",
+      });
+      const uiResponse = yield* nextCommand(state);
+      expect(uiResponse.type).toBe("extension_ui_response");
+      expect(uiResponse.id).toBe("dialog-3");
+      expect(uiResponse.value).toBe("B");
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("treats only the exact Approve/Deny option set as an approval", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              {
+                type: "extension_ui_request",
+                id: "dialog-1",
+                method: "select",
+                title: "How should I proceed?",
+                // A near-miss approval set: extra option, so NOT an
+                // approval dialog.
+                options: ["Approve", "Deny", "Ask again later"],
+              },
+            ];
+          case "extension_ui_response":
+            return [];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const uiRequested = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { uiRequested },
+        matches: (event) => (event.type === "user-input.requested" ? "uiRequested" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "approval-required",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      yield* Deferred.await(uiRequested);
+      const events = yield* Ref.get(collector.events);
+
+      // Not an approval: no request.opened, and every option surfaces as a
+      // user-input question option.
+      expect(events.some((event) => event.type === "request.opened")).toBe(false);
+      const uiRequestedEvent = events.find((event) => event.type === "user-input.requested");
+      expect(uiRequestedEvent).toBeDefined();
+      if (uiRequestedEvent?.type !== "user-input.requested") {
+        throw new Error("expected user-input.requested");
+      }
+      expect(uiRequestedEvent.payload.questions[0]).toMatchObject({
+        // Same generic question text as the pi adapter's select mapping.
+        question: "Select an option",
+        options: [
+          { label: "Approve", description: "Approve" },
+          { label: "Deny", description: "Deny" },
+          { label: "Ask again later", description: "Ask again later" },
+        ],
+      });
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  it.effect("maps acceptForSession and cancel onto single Approve/Deny writes", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              {
+                type: "extension_ui_request",
+                id: "approval-1",
+                method: "select",
+                title: "Allow tool: bash",
+                options: ["Approve", "Deny"],
+              },
+            ];
+          case "extension_ui_response":
+            return [];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const opened1 = yield* Deferred.make<undefined>();
+      const opened2 = yield* Deferred.make<undefined>();
+      const resolved1 = yield* Deferred.make<undefined>();
+      const resolved2 = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { opened1, opened2, resolved1, resolved2 },
+        matches: (event) => {
+          if (event.type === "request.opened") {
+            return String(event.requestId) === "approval-2" ? "opened2" : "opened1";
+          }
+          if (event.type === "request.resolved") {
+            return String(event.requestId) === "approval-2" ? "resolved2" : "resolved1";
+          }
+          return undefined;
+        },
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "approval-required",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "hi",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      // acceptForSession has no OMP equivalent: one Approve write.
+      yield* Deferred.await(opened1);
+      yield* adapter.respondToRequest(
+        threadId,
+        ApprovalRequestId.make("approval-1"),
+        "acceptForSession",
+      );
+      const first = yield* nextCommand(state);
+      expect(first.type).toBe("extension_ui_response");
+      expect(first.id).toBe("approval-1");
+      expect(first.value).toBe("Approve");
+      yield* Deferred.await(resolved1);
+      const resolved1Event = (yield* Ref.get(collector.events)).find(
+        (event) => event.type === "request.resolved" && String(event.requestId) === "approval-1",
+      );
+      expect(resolved1Event?.type === "request.resolved" && resolved1Event.payload).toMatchObject({
+        requestType: "dynamic_tool_call",
+        decision: "acceptForSession",
+      });
+
+      // A second approval dialog: cancel must never grant the tool.
+      yield* Queue.offer(
+        state.output,
+        Buffer.from(
+          // @effect-diagnostics-next-line preferSchemaOverJson:off
+          JSON.stringify({
+            type: "extension_ui_request",
+            id: "approval-2",
+            method: "select",
+            title: "Allow tool: bash",
+            options: ["Approve", "Deny"],
+          }) + "\n",
+        ),
+      );
+      yield* Deferred.await(opened2);
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("approval-2"), "cancel");
+      const second = yield* nextCommand(state);
+      expect(second.type).toBe("extension_ui_response");
+      expect(second.id).toBe("approval-2");
+      expect(second.value).toBe("Deny");
+      yield* Deferred.await(resolved2);
+      const resolved2Event = (yield* Ref.get(collector.events)).find(
+        (event) => event.type === "request.resolved" && String(event.requestId) === "approval-2",
+      );
+      expect(resolved2Event?.type === "request.resolved" && resolved2Event.payload).toMatchObject({
+        requestType: "dynamic_tool_call",
+        decision: "cancel",
+      });
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
   it.effect("surfaces subagents as stable activity rows with scrubbed output", () =>
     Effect.gen(function* () {
       const state = yield* makeScriptedState((command) => {
