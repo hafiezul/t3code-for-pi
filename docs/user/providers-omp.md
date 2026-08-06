@@ -22,8 +22,9 @@ T3 Code server:
 npm install -g @oh-my-pi/pi-coding-agent
 ```
 
-OMP needs at least version 17.0.9 — T3 Code checks the version when it probes the provider and
-tells you if OMP is too old.
+OMP needs at least version 17.0.9. T3 Code checks the version when it probes the provider; if
+yours is older, the provider shows "OMP vX is too old. Upgrade to v17.0.9 or newer." and stays
+unavailable until you update — see [Updating OMP](#updating-omp) below.
 
 Authenticate the providers you want to use. OMP reads credentials from your `~/.omp` directory,
 your environment, or the API key fields in T3 Code Settings:
@@ -75,6 +76,13 @@ turn**, no restart, no context loss. If OMP rejects the new model, T3 Code shows
 session continues on the previous model. The thinking-tier selector works the same way: pick a new
 tier mid-thread and it applies on the next turn.
 
+## Subagents
+
+OMP can delegate work to subagents, and T3 Code shows each one as a row in the work log. A row
+appears when the subagent starts, updates in place as it reports progress (progress renders muted,
+like thinking), and settles with a done or error state when it finishes. The rows stay in the log
+as history after the session ends.
+
 ## Permissions
 
 OMP's tool-approval prompts map onto T3 Code's approval flow:
@@ -85,11 +93,23 @@ OMP's tool-approval prompts map onto T3 Code's approval flow:
 
 Use T3 Code's normal permission-mode controls; the mode applies when the session launches.
 
+## Rewinding a Thread
+
+T3 Code checkpoints each turn, and you can rewind a thread to an earlier one: hover over a user
+message and pick the revert icon, then confirm. Newer messages and turn diffs are discarded, and
+the workspace is restored to that turn's checkpoint.
+
+For OMP, rewinding branches the running session: the thread continues in a fresh branch from the
+kept turn — no restart, no context loss — while the discarded path stays in OMP's own session
+history, where you can still reach it through the OMP TUI. T3 Code refuses to rewind while a turn
+is running, so interrupt the turn first.
+
 ## Updating OMP
 
-T3 Code checks the installed omp version against `@oh-my-pi/pi-coding-agent` on npm and shows an
-advisory when OMP is behind, with an **Update now** button that runs the update for you. You can
-also update manually:
+T3 Code checks the installed omp version against the latest `@oh-my-pi/pi-coding-agent` release
+on npm and shows an advisory when OMP is behind. If omp came from a package manager (npm, pnpm,
+bun, or vp), the advisory includes an **Update now** button that runs the upgrade through it;
+otherwise the advisory is informational and you update manually:
 
 ```bash
 npm install -g @oh-my-pi/pi-coding-agent@latest

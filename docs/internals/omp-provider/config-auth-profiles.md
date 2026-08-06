@@ -2,7 +2,10 @@
 
 Research asset for wayfinder ticket [Research: OMP config, auth, and profile surfaces](https://github.com/hafiezul/t3code-for-pi/issues/64) (map [OMP as a first-class provider in T3 Code](https://github.com/hafiezul/t3code-for-pi/issues/62)).
 
-Verified 2026-08-04 against the installed omp v17.2.7 binary (`~/.local/bin/omp` → `/opt/homebrew/bin/omp`, Homebrew) — `--help`, `config --help/list/path`, `token --help`, `models --help`, `update --help`, `auth-broker --help`, `auth-gateway --help` — and the live home `~/.omp`, read-only (SQLite opened with `mode=ro`). The npm package `@oh-my-pi/pi-coding-agent` is not installed on this machine; its layout is unverified.
+Verified 2026-08-04 against the installed omp v17.2.7 binary (`~/.local/bin/omp` → `/opt/homebrew/bin/omp`, Homebrew) — `--help`, `config --help/list/path`, `token --help`, `models --help`, `update --help`, `auth-broker --help`, `auth-gateway --help` — and the live home `~/.omp`, read-only (SQLite opened with `mode=ro`). The npm package `@oh-my-pi/pi-coding-agent` is not installed on this machine; its layout is
+unverified. The package name itself is pinned by the OMP driver's maintenance resolver
+(`OmpDriver.ts` — npm-only distribution, no Homebrew formula, no native updater), so Homebrew
+installs get the version advisory without an inline update.
 
 ## Where things live
 
@@ -72,7 +75,7 @@ Verified 2026-08-04 against the installed omp v17.2.7 binary (`~/.local/bin/omp`
 - Guardrails: `--max-time`, `--no-pty`, `--no-tools`, `--tools <list>`, `--no-lsp`, `--no-title`.
 - Config injection: `--config <file>` overlay (repeatable) — recommended for per-session settings without touching the user's `config.yml`.
 - Auth: `--api-key <value>`.
-- Updates: `omp update` self-updates (`-c/--check`, `-l/--plugins`; `GITHUB_TOKEN`/`GH_TOKEN` avoid release rate limits). This install is Homebrew; the map names npm `@oh-my-pi/pi-coding-agent` as the distribution — unverified here.
+- Updates: `omp update` self-updates (`-c/--check`, `-l/--plugins`; `GITHUB_TOKEN`/`GH_TOKEN` avoid release rate limits). This install is Homebrew; the distribution pinned by the driver's maintenance resolver is npm `@oh-my-pi/pi-coding-agent` (no Homebrew formula), and its tarball layout remains unverified.
 
 ## What a T3 settings surface needs
 

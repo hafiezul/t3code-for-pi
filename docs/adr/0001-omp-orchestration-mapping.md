@@ -71,7 +71,8 @@ contract changes.
 - Approval recognition is a heuristic (exact option set `["Approve","Deny"]`); a user-facing
   extension using those exact options would be misclassified as an approval — an accepted,
   documentable rule.
-- OMP's `write` approval tier semantics (what it prompts on) are unverified; pin them when
-  mapping T3's `auto-accept-edits` during implementation.
+- OMP's `write` approval tier semantics (what it prompts on) remain unverified; the
+  `auto-accept-edits` → `--approval-mode write` mapping is the pinned design decision
+  (`resolveOmpApprovalMode` in `OmpAdapter.ts`, covered by `OmpAdapter.test.ts`).
 - `agent_end` with `isTerminal: false` keeps the T3 turn open; the boundary and resume-cursor
   mechanics key on terminal settles, which the checkpoint-restore ticket builds on.
