@@ -54,7 +54,11 @@ const decodeOmpSettings = Schema.decodeSync(OmpSettings);
 
 const DRIVER_KIND = ProviderDriverKind.make("omp");
 
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
+/**
+ * Maintenance resolver for OMP, exported as the driver's maintenance seam
+ * for tests (see the module doc for the npm-only decision).
+ */
+export const OMP_MAINTENANCE_RESOLVER = makePackageManagedProviderMaintenanceResolver({
   provider: DRIVER_KIND,
   npmPackageName: "@oh-my-pi/pi-coding-agent",
   homebrewFormula: null,
@@ -115,10 +119,13 @@ export const OmpDriver: ProviderDriver<OmpSettings, OmpDriverEnv> = {
         continuationGroupKey: continuationIdentity.continuationKey,
       });
       const effectiveConfig = { ...config, enabled } satisfies OmpSettings;
-      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-        binaryPath: effectiveConfig.binaryPath,
-        env: processEnv,
-      });
+      const maintenanceCapabilities = yield* resolveProviderMaintenanceCapabilitiesEffect(
+        OMP_MAINTENANCE_RESOLVER,
+        {
+          binaryPath: effectiveConfig.binaryPath,
+          env: processEnv,
+        },
+      );
 
       const adapter = yield* makeOmpAdapter(effectiveConfig, {
         instanceId,
