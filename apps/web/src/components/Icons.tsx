@@ -696,3 +696,14 @@ export const PiAgentIcon: Icon = ({ className, ...props }) => (
     <path fill="#fff" d="M517.36 400H634.72V634.72H517.36Z" />
   </svg>
 );
+
+export const OmpAgentIcon: Icon = ({ className, ...props }) => (
+  <svg {...props} viewBox="0 0 800 800" className={cn("fill-none", className)}>
+    <rect width="800" height="800" rx="160" fill="#000" />
+    <path
+      fill="#fff"
+      fillRule="evenodd"
+      d="M400 165.29A234.71 234.71 0 1 0 400 634.71A234.71 234.71 0 1 0 400 165.29ZM400 275A125 125 0 1 1 400 525A125 125 0 1 1 400 275Z"
+    />
+  </svg>
+);

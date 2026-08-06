@@ -60,7 +60,7 @@ const runProbe = (
   );
 
 describe("parseOmpModels", () => {
-  it("parses response rows into provider/name pairs with thinking effects", () => {
+  it("parses flat response rows into provider/id/name triples with thinking effects", () => {
     const stdout = [
       JSON.stringify({ type: "ready", protocolVersion: 2 }),
       JSON.stringify({
@@ -71,10 +71,21 @@ describe("parseOmpModels", () => {
           models: [
             {
               provider: "opencode-go",
-              model: { name: "deepseek-v4-flash", thinking: { effects: ["high", "max"] } },
+              id: "deepseek-v4-flash",
+              name: "DeepSeek V4 Flash",
+              thinking: { mode: "effort", efforts: ["high", "max"] },
             },
-            { provider: "anthropic", model: { name: "claude-opus-4-8" } },
-            { provider: "openai-codex", model: { name: "gpt-5.4", thinking: { effects: [] } } },
+            {
+              provider: "anthropic",
+              id: "claude-opus-4-8",
+              name: "Claude Opus 4.8",
+            },
+            {
+              provider: "openai-codex",
+              id: "gpt-5.4",
+              name: "GPT-5.4",
+              thinking: { efforts: [] },
+            },
           ],
         },
       }),
@@ -83,9 +94,19 @@ describe("parseOmpModels", () => {
 
     const rows = parseOmpModels(stdout);
     expect(rows).toEqual([
-      { provider: "opencode-go", name: "deepseek-v4-flash", thinkingEffects: ["high", "max"] },
-      { provider: "anthropic", name: "claude-opus-4-8", thinkingEffects: [] },
-      { provider: "openai-codex", name: "gpt-5.4", thinkingEffects: [] },
+      {
+        provider: "opencode-go",
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        thinkingEffects: ["high", "max"],
+      },
+      {
+        provider: "anthropic",
+        id: "claude-opus-4-8",
+        name: "Claude Opus 4.8",
+        thinkingEffects: [],
+      },
+      { provider: "openai-codex", id: "gpt-5.4", name: "GPT-5.4", thinkingEffects: [] },
     ]);
   });
 
@@ -94,10 +115,35 @@ describe("parseOmpModels", () => {
       type: "response",
       command: "get_available_models",
       success: true,
-      data: [{ provider: "ollama", model: { name: "llama3.3" } }],
+      data: [{ provider: "ollama", id: "llama3.3", name: "Llama 3.3" }],
     });
     expect(parseOmpModels(stdout)).toEqual([
-      { provider: "ollama", name: "llama3.3", thinkingEffects: [] },
+      { provider: "ollama", id: "llama3.3", name: "Llama 3.3", thinkingEffects: [] },
+    ]);
+  });
+
+  it("tolerates nested model objects and name-only rows", () => {
+    const stdout = JSON.stringify({
+      type: "response",
+      command: "get_available_models",
+      success: true,
+      data: {
+        models: [
+          { provider: "ollama", model: { name: "llama3.3" } },
+          { provider: "ollama", id: "llama3.3:70b", name: "Llama 3.3 70B" },
+          {
+            provider: "ollama",
+            id: "llama3.3:8b",
+            name: "Llama 3.3 8B",
+            thinking: { effects: ["high"] },
+          },
+        ],
+      },
+    });
+    expect(parseOmpModels(stdout)).toEqual([
+      { provider: "ollama", id: "llama3.3", name: "llama3.3", thinkingEffects: [] },
+      { provider: "ollama", id: "llama3.3:70b", name: "Llama 3.3 70B", thinkingEffects: [] },
+      { provider: "ollama", id: "llama3.3:8b", name: "Llama 3.3 8B", thinkingEffects: ["high"] },
     ]);
   });
 
@@ -158,13 +204,24 @@ describe("parseOmpCommands", () => {
 });
 
 describe("flattenOmpModels", () => {
-  it("builds slugs with first-slash semantics and thinking tier descriptors", () => {
+  it("builds provider/id slugs with display names and thinking tier descriptors", () => {
     const models = flattenOmpModels([
-      { provider: "opencode-go", name: "deepseek-v4-flash", thinkingEffects: ["high", "max"] },
-      { provider: "anthropic", name: "claude-opus-4-8", thinkingEffects: [] },
+      {
+        provider: "opencode-go",
+        id: "deepseek-v4-flash",
+        name: "DeepSeek V4 Flash",
+        thinkingEffects: ["high", "max"],
+      },
+      {
+        provider: "anthropic",
+        id: "claude-opus-4-8",
+        name: "Claude Opus 4.8",
+        thinkingEffects: [],
+      },
     ]);
 
     expect(models[0]?.slug).toBe("opencode-go/deepseek-v4-flash");
+    expect(models[0]?.name).toBe("DeepSeek V4 Flash");
     expect(models[0]?.isCustom).toBe(false);
     expect(models[0]?.capabilities?.optionDescriptors).toEqual([
       {
@@ -177,6 +234,8 @@ describe("flattenOmpModels", () => {
         ],
       },
     ]);
+    expect(models[1]?.slug).toBe("anthropic/claude-opus-4-8");
+    expect(models[1]?.name).toBe("Claude Opus 4.8");
     expect(models[1]?.capabilities?.optionDescriptors).toEqual([]);
   });
 });
@@ -234,7 +293,9 @@ describe("checkOmpProviderStatus", () => {
               models: [
                 {
                   provider: "opencode-go",
-                  model: { name: "deepseek-v4-flash", thinking: { effects: ["high", "max"] } },
+                  id: "deepseek-v4-flash",
+                  name: "DeepSeek V4 Flash",
+                  thinking: { efforts: ["high", "max"] },
                 },
               ],
             },
@@ -336,7 +397,11 @@ describe("checkOmpProviderStatus", () => {
               type: "response",
               command: "get_available_models",
               success: true,
-              data: { models: [{ provider: "opencode-go", model: { name: "deepseek-v4-flash" } }] },
+              data: {
+                models: [
+                  { provider: "opencode-go", id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+                ],
+              },
             }) + "\n",
           );
         }
@@ -366,7 +431,11 @@ describe("checkOmpProviderStatus", () => {
               type: "response",
               command: "get_available_models",
               success: true,
-              data: { models: [{ provider: "opencode-go", model: { name: "deepseek-v4-flash" } }] },
+              data: {
+                models: [
+                  { provider: "opencode-go", id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" },
+                ],
+              },
             }) + "\n",
           );
         }

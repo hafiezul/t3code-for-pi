@@ -61,6 +61,37 @@ describe("ProviderSettingsForm helpers", () => {
     });
   });
 
+  it("derives the OMP provider fields with the profile and masked keys", () => {
+    const omp = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("omp")];
+
+    expect(omp).toBeDefined();
+    expect(deriveProviderSettingsFields(omp!).map((field) => field.key)).toEqual([
+      "binaryPath",
+      "launchArgs",
+      "profile",
+      "anthropicApiKey",
+      "openaiApiKey",
+      "geminiApiKey",
+      "groqApiKey",
+      "xaiApiKey",
+    ]);
+
+    const anthropicApiKey = deriveProviderSettingsFields(omp!).find(
+      (field) => field.key === "anthropicApiKey",
+    );
+    expect(anthropicApiKey).toMatchObject({
+      label: "Anthropic API key",
+      description: "Injected as ANTHROPIC_API_KEY for omp sessions.",
+      control: "password",
+    });
+
+    const profile = deriveProviderSettingsFields(omp!).find((field) => field.key === "profile");
+    expect(profile).toMatchObject({
+      label: "Profile",
+      description: "OMP profile to launch with (empty = default profile).",
+    });
+  });
+
   it("preserves unknown config keys while omitting empty configurable fields", () => {
     const opencode = DRIVER_OPTION_BY_VALUE[ProviderDriverKind.make("opencode")];
     expect(opencode).toBeDefined();

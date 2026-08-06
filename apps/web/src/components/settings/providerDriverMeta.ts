@@ -3,6 +3,7 @@ import {
   CodexSettings,
   CursorSettings,
   GrokSettings,
+  OmpSettings,
   OpenCodeSettings,
   PiSettings,
   ProviderDriverKind,
@@ -14,6 +15,7 @@ import {
   GrokIcon,
   type Icon,
   OpenAI,
+  OmpAgentIcon,
   OpenCodeIcon,
   PiAgentIcon,
 } from "../Icons";
@@ -81,6 +83,12 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Pi",
     icon: PiAgentIcon,
     settingsSchema: PiSettings,
+  },
+  {
+    value: ProviderDriverKind.make("omp"),
+    label: "OMP",
+    icon: OmpAgentIcon,
+    settingsSchema: OmpSettings,
   },
 ];
 

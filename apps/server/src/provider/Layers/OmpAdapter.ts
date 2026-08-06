@@ -1789,10 +1789,10 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         yield* Ref.set(context.agentActivitySincePromptRef, false);
         // Node timer, not `Effect.sleep`: the adapter's tests run under a
         // TestClock where Effect.sleep never resumes, and production time is
-        // real wall-clock anyway. The grace window lets slow agent work that
-        // reports a false `agentInvoked`... not happen; the flag is
-        // authoritative, but the window absorbs command output events that
-        // stream right after the response.
+        // real wall-clock anyway. The grace window absorbs command output
+        // events that stream right after the response; the get_state probe
+        // below then distinguishes a true command turn from a slow agent
+        // turn that reported a false `agentInvoked`.
         yield* Effect.promise(
           () =>
             new Promise<void>((resolve) => {
@@ -1805,6 +1805,12 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         const sawAgentActivity = yield* Ref.get(context.agentActivitySincePromptRef);
         const stopped = yield* Ref.get(context.stopped);
         if (!sawAgentActivity && !stopped && context.activeTurnId === turnId) {
+          // No agent activity within the window: either a true extension-command
+          // turn (OMP never settles it) or a slow agent turn whose first
+          // message_start simply hasn't streamed yet (throttled model, cold
+          // upstream). Ask OMP which it is before concluding — synthesizing
+          // completion for a live turn would close the session to "ready"
+          // while OMP keeps working, orphaning the streamed output.
           const stillStreaming = yield* context.client.send({ type: "get_state" }).pipe(
             Effect.map((response) => {
               const data = (response.data ?? {}) as Record<string, unknown>;

@@ -99,29 +99,40 @@ function formatOmpProbeFailure(input: { cause: unknown; version: string | null }
 /** One row of the `get_available_models` response the probe cares about. */
 export interface OmpModelRow {
   readonly provider: string;
+  /** Selectable model id — the slug suffix OMP's `--model` accepts
+   *  (`provider/id`). Falls back to the display name on protocol variants
+   *  that only carry `name`. */
+  readonly id: string;
   readonly name: string;
   readonly thinkingEffects: ReadonlyArray<string>;
 }
 
 function parseOmpModelRow(record: Record<string, unknown>): OmpModelRow | undefined {
+  // The live response rows are flat (`{id, name, provider, thinking}` —
+  // verified against omp 17.2.7); tolerate a nested `model` object for
+  // protocol age variance.
+  const modelRecord =
+    typeof record.model === "object" && record.model !== null
+      ? (record.model as Record<string, unknown>)
+      : record;
   const provider = record.provider;
   if (typeof provider !== "string" || provider.trim().length === 0) {
     return undefined;
   }
-  const model = record.model;
-  if (typeof model !== "object" || model === null) {
-    return undefined;
-  }
-  const modelRecord = model as Record<string, unknown>;
+  const id = modelRecord.id;
   const name = modelRecord.name;
   if (typeof name !== "string" || name.trim().length === 0) {
     return undefined;
   }
+  const resolvedId = typeof id === "string" && id.trim().length > 0 ? id.trim() : name.trim();
   const thinking = modelRecord.thinking;
   const thinkingEffects: ReadonlyArray<string> =
     typeof thinking === "object" && thinking !== null
       ? (() => {
-          const effects = (thinking as Record<string, unknown>).effects;
+          // Live protocol key is `efforts` (verified against omp 17.2.7);
+          // accept the spec-era `effects` spelling too.
+          const thinkingRecord = thinking as Record<string, unknown>;
+          const effects = thinkingRecord.efforts ?? thinkingRecord.effects;
           return Array.isArray(effects)
             ? effects.filter((effect): effect is string => typeof effect === "string")
             : [];
@@ -129,6 +140,7 @@ function parseOmpModelRow(record: Record<string, unknown>): OmpModelRow | undefi
       : [];
   return {
     provider: provider.trim(),
+    id: resolvedId,
     name: name.trim(),
     thinkingEffects,
   };
@@ -195,16 +207,17 @@ export function parseOmpModels(stdout: string): ReadonlyArray<OmpModelRow> {
 
 /**
  * Flatten `get_available_models` rows into `ServerProviderModel`s. Slug is
- * `provider/model` (split at the first `/`; model ids may contain `/`),
- * name is the model name; a thinking-tier descriptor is built from the
- * model's own `thinking.effects` (observed `["high","max"]`), absent when
- * the model has none.
+ * `provider/id` (the wire form OMP's `--model` accepts; display names can
+ * differ from ids — e.g. `anthropic/claude-3-7-sonnet-20250219` vs
+ * "Claude Sonnet 3.7"), name is the display name; a thinking-tier
+ * descriptor is built from the model's own `thinking.efforts` (observed
+ * `["high","max"]`), absent when the model has none.
  */
 export function flattenOmpModels(
   rows: ReadonlyArray<OmpModelRow>,
 ): ReadonlyArray<ServerProviderModel> {
   return rows.map((row) => ({
-    slug: `${row.provider}/${row.name}`,
+    slug: `${row.provider}/${row.id}`,
     name: row.name,
     subProvider: row.provider,
     isCustom: false,
