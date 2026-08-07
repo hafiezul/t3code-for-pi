@@ -40,6 +40,8 @@ export function formatProviderDisplayName(provider: string | null | undefined): 
       return "OpenCode";
     case "pi":
       return "Pi";
+    case "omp":
+      return "OMP";
     default: {
       // Title-case unknown driver kinds so they read reasonably.
       const trimmed = provider.replace(/Agent$/i, "").trim();
@@ -89,6 +91,7 @@ export function deriveLatestContextWindowSnapshot(
       lastReasoningOutputTokens: asFiniteNumber(payload?.lastReasoningOutputTokens),
       toolUses: asFiniteNumber(payload?.toolUses),
       durationMs: asFiniteNumber(payload?.durationMs),
+      costUsd: asFiniteNumber(payload?.costUsd),
       compactsAutomatically: asBoolean(payload?.compactsAutomatically) ?? false,
       updatedAt: activity.createdAt,
     };
@@ -111,4 +114,19 @@ export function formatContextWindowTokens(value: number | null): string {
     return `${Math.round(value / 1_000)}k`;
   }
   return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+}
+
+/** Format a USD cost the way the Pi TUI status line does: 3 decimals for
+ *  sub-dollar amounts, fewer as the amount grows. Null for no cost. */
+export function formatCostUsd(value: number | null | undefined): string | null {
+  if (value === null || value === undefined || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  if (value < 1) {
+    return `$${value.toFixed(3)}`;
+  }
+  if (value < 100) {
+    return `$${value.toFixed(2)}`;
+  }
+  return `$${value.toFixed(1)}`;
 }

@@ -55,3 +55,15 @@ _Avoid_: quick action, command
 **Provider snapshot**:
 The per-instance capability payload the server sends clients (driver kind, display name, models, slash commands, skills, capabilities). What a provider can do is declared here; clients render it generically.
 _Avoid_: provider metadata
+
+**Pi-lineage provider**:
+pi or omp (Oh My Pi) — the two providers driven over the pi-family JSONL RPC protocol, which both stream per-request usage data on assistant messages.
+_Avoid_: pi family, pi-style provider
+
+**Token usage snapshot**:
+The per-request accounting a provider emits during a turn — input, output, cached, and reasoning tokens, plus cost. T3 renders the latest one as context usage.
+_Avoid_: usage event, token stats
+
+**Context usage**:
+The share of the model's context window a request consumed, shown as used tokens over the window total.
+_Avoid_: context percentage, context %

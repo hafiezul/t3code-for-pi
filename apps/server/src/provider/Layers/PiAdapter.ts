@@ -84,6 +84,11 @@ import {
 import { makePiRpcClient, type PiRpcClient, type PiRpcEvent } from "../piRuntime.ts";
 import type { ProviderAdapterShape } from "../Services/ProviderAdapter.ts";
 import { makeEventNdjsonLogger, type EventNdjsonLogger } from "./EventNdjsonLogger.ts";
+import {
+  makePiFamilyTokenUsageSnapshot,
+  piFamilyContextWindowTable,
+  piFamilyUsageFromEvent,
+} from "./piFamilyUsage.ts";
 import type { PiSettings } from "@t3tools/contracts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
@@ -213,6 +218,14 @@ interface PiAdapterSessionContext {
   readonly stopped: Ref.Ref<boolean>;
   /** Boundary-recording jobs, serialized by a single worker fiber. */
   readonly boundaryJobs: Queue.Queue<void>;
+  /** `provider/model → contextWindow`, fetched once per session over RPC
+   *  (`get_available_models`); undefined until first fetched. */
+  readonly modelContextTableRef: Ref.Ref<ReadonlyMap<string, number> | undefined>;
+  /** Session-cumulative new input+output tokens (ADR-0002: per-request
+   *  totals would double-count the cached context). */
+  readonly processedTokensRef: Ref.Ref<{ readonly input: number; readonly output: number }>;
+  /** USD cost accumulated across the active turn's assistant messages. */
+  readonly turnCostUsdRef: Ref.Ref<number>;
 }
 
 type PiUiRequest =
@@ -1059,6 +1072,38 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
     yield* Effect.logDebug("Ignoring pi extension UI request", { method, id });
   });
 
+  /** One-shot per session: fetch the `provider/model → contextWindow`
+   *  table over RPC. Failure or an unknown model degrades to no `maxTokens`
+   *  (the meter shows tokens without a ring), never a failed turn. */
+  const ensureModelContextTable = Effect.fn("ensureModelContextTable")(function* (
+    context: PiAdapterSessionContext,
+  ) {
+    const cached = yield* Ref.get(context.modelContextTableRef);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const table = yield* context.client.send({ type: "get_available_models" }).pipe(
+      Effect.map((response) => piFamilyContextWindowTable(response.data)),
+      Effect.catch((cause) =>
+        Effect.logWarning("Pi model-context table fetch failed; meter ring disabled", {
+          threadId: context.threadId,
+          detail: cause.detail,
+        }).pipe(Effect.as(new Map<string, number>())),
+      ),
+    );
+    yield* Ref.set(context.modelContextTableRef, table);
+    return table;
+  });
+
+  /** `{ totalCostUsd }` for a turn.completed payload when the turn accrued
+   *  cost (empty object otherwise) — shared by every settle path. */
+  const turnCostPayload = (
+    context: PiAdapterSessionContext,
+  ): Effect.Effect<{ readonly totalCostUsd: number } | Record<string, never>, never> =>
+    Ref.get(context.turnCostUsdRef).pipe(
+      Effect.map((totalCostUsd) => (totalCostUsd > 0 ? { totalCostUsd } : {})),
+    );
+
   const handlePiEvent = Effect.fn("handlePiEvent")(function* (
     context: PiAdapterSessionContext,
     event: PiRpcEvent,
@@ -1114,6 +1159,42 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       }
     }
 
+    // Token usage: pi's assistant `message_end` carries the request's final
+    // usage (zeroed while streaming). Emit one snapshot per assistant
+    // message — the meter derives the latest, so multi-message turns update
+    // live (ADR-0002). The terminal settle carries no additional usage data.
+    if (event.type === "message_end" && context.activeTurnId !== undefined) {
+      const usage = piFamilyUsageFromEvent(event);
+      if (usage !== undefined) {
+        const processed = yield* Ref.updateAndGet(context.processedTokensRef, (current) => ({
+          input: current.input + usage.input,
+          output: current.output + usage.output,
+        }));
+        yield* Ref.update(context.turnCostUsdRef, (cost) => cost + usage.costTotalUsd);
+        const message = (event.message ?? {}) as Record<string, unknown>;
+        const contextWindow =
+          typeof message.provider === "string" && typeof message.model === "string"
+            ? (yield* ensureModelContextTable(context)).get(`${message.provider}/${message.model}`)
+            : undefined;
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId: context.threadId,
+            turnId: context.activeTurnId,
+            raw: event,
+          })),
+          type: "thread.token-usage.updated",
+          payload: {
+            usage: makePiFamilyTokenUsageSnapshot({
+              usage,
+              processedInputTokens: processed.input,
+              processedOutputTokens: processed.output,
+              contextWindow,
+            }),
+          },
+        });
+      }
+    }
+
     if (event.type === "agent_settled") {
       const suppressed = yield* Ref.getAndSet(context.suppressNextSettled, false);
       if (!suppressed && context.activeTurnId !== undefined) {
@@ -1140,10 +1221,12 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         yield* emit({
           ...(yield* buildEventBase({ threadId: context.threadId, turnId, raw: event })),
           type: "turn.completed",
-          payload:
-            turnError !== undefined
+          payload: {
+            ...(turnError !== undefined
               ? { state: "failed", errorMessage: turnError }
-              : { state: "completed" },
+              : { state: "completed" }),
+            ...(yield* turnCostPayload(context)),
+          },
         });
         yield* Queue.offer(context.boundaryJobs, void 0);
       }
@@ -1482,6 +1565,9 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
           agentActivitySincePromptRef: yield* Ref.make(false),
           stopped: yield* Ref.make(false),
           boundaryJobs,
+          modelContextTableRef: yield* Ref.make<ReadonlyMap<string, number> | undefined>(undefined),
+          processedTokensRef: yield* Ref.make({ input: 0, output: 0 }),
+          turnCostUsdRef: yield* Ref.make(0),
         };
         yield* syncSessionCursor(context);
 
@@ -1632,6 +1718,8 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       );
 
       if (steeringTurnId === undefined) {
+        // Fresh turn: zero the turn-cost accumulator (a steer keeps it).
+        yield* Ref.set(context.turnCostUsdRef, 0);
         yield* emit({
           ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
           type: "turn.started",
@@ -1822,7 +1910,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         yield* emit({
           ...(yield* buildEventBase({ threadId, turnId: activeTurnId })),
           type: "turn.completed",
-          payload: { state: "interrupted", errorMessage: "Interrupted by user." },
+          payload: {
+            state: "interrupted",
+            errorMessage: "Interrupted by user.",
+            ...(yield* turnCostPayload(context)),
+          },
         });
         yield* emit({
           ...(yield* buildEventBase({ threadId, turnId: activeTurnId })),

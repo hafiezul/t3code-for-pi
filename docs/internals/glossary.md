@@ -120,6 +120,18 @@ Controls how assistant text reaches the thread timeline. In [the contracts][1], 
 
 A point-in-time view of state. The word is used in multiple layers, including orchestration, provider, and checkpointing. See [ProjectionSnapshotQuery.ts][10], [ProviderAdapter.ts][15], and [CheckpointStore.ts][19].
 
+#### Token usage snapshot
+
+The per-request accounting a provider emits during a turn — input, output, cached, and reasoning tokens, plus cost. Rides the `thread.token-usage.updated` runtime event into a `context-window.updated` thread activity, which the web renders as the context-window meter. Only Codex, Claude, Pi, and OMP emit it today. See [piFamilyUsage.ts][25] for the Pi-lineage mapping (ADR-0002).
+
+#### Context usage
+
+The share of the model's context window a request consumed, shown as used tokens over the window total. For Pi-lineage providers the used figure is the request's `totalTokens` — a proxy for the Pi TUI's context indicator, slightly higher because it includes output tokens (ADR-0002).
+
+#### Pi-lineage provider
+
+pi or omp (Oh My Pi) — the two providers driven over the pi-family JSONL RPC protocol, which both stream per-request usage data on assistant messages. See [piFamilyUsage.ts][25].
+
 ### Checkpointing
 
 Checkpointing captures workspace state over time so the app can diff turns and restore earlier points. The main pieces are [CheckpointStore.ts][19], [CheckpointDiffQuery.ts][20], and [CheckpointReactor.ts][6].
@@ -183,3 +195,4 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../../apps/server/src/checkpointing/Utils.ts
 [23]: ../../apps/server/src/checkpointing/Diffs.ts
 [24]: ./overview.md
+[25]: ../../apps/server/src/provider/Layers/piFamilyUsage.ts

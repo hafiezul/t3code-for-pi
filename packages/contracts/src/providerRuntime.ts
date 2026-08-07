@@ -325,6 +325,8 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   lastReasoningOutputTokens: Schema.optional(NonNegativeInt),
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
+  /** USD cost of the request this snapshot describes (pi/omp). */
+  costUsd: Schema.optional(Schema.Number),
   compactsAutomatically: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;

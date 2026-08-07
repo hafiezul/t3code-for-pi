@@ -1,0 +1,27 @@
+# Pi and OMP token usage and cost ride the existing context-window pipeline
+
+Pi and OMP (both Pi-lineage RPC providers) expose per-request usage on the wire — `usage {input, output, cacheRead, cacheWrite, reasoning|reasoningTokens, totalTokens, cost {…total}}` on assistant `message_end`, `turn_end`, and `agent_end.messages` — but T3 dropped it: their adapters emitted bare `turn.completed` payloads, so users saw none of the context information Codex and Claude users get (tokens, context-window meter, auto-compact note). We decided to feed the existing `thread.token-usage.updated` pipeline (persisted as `context-window.updated` activity, rendered by the web `ContextWindowMeter`) from both adapters, extend the snapshot with a per-request `costUsd`, and add a cost line to the meter popover rendered generically. No new UI component, no mobile work.
+
+## Decisions
+
+1. **Data source.** Parse the `usage` object carried on assistant `message_end` events (final per-request numbers; zeroed during streaming, so `message_update` is ignored). The same mapping table feeds both adapters via one shared pi-family parser module — OmpAdapter keeps its fresh-write status, PiAdapter its reference status; nothing is cloned.
+2. **Cadence.** Emit `thread.token-usage.updated` on every assistant `message_end` — usage is only ever carried on assistant messages, so the last `message_end` of a turn already is the final snapshot; the terminal settle (`agent_settled` / `agent_end` with `isTerminal !== false`) adds nothing but the turn's summed `totalCostUsd` on `turn.completed`. An OMP `agent_end` with `isTerminal: false` keeps the turn open and emits nothing.
+3. **Field mapping.** `inputTokens←input`, `outputTokens←output`, `cachedInputTokens←cacheRead`, `reasoningOutputTokens←reasoning` (pi) / `reasoningTokens` (omp), `usedTokens←totalTokens`, `totalProcessedTokens←adapter-accumulated input+output` (per-request totals double-count the cached context, so the raw sum is rejected), `costUsd←cost.total`, `durationMs←duration` (OMP only — pi's wire lacks it), `compactsAutomatically←true` (unconditional, matching the TUI's `(auto)` default and Codex's precedent).
+4. **Context window total.** Adapter-internal, looked up by the wire's `provider`/`model` fields at emission time against a table fetched **once per session over the session's own RPC child** via `get_available_models` (pi ≥ 0.83 and omp ≥ 17.2.7 both return full model objects with `contextWindow`; verified live). The fetch is lazy (first usage emission), cached in a session `Ref`, and its failure degrades to an empty table — never a failed turn. A model missing from the table yields a snapshot without `maxTokens`; the meter degrades to tokens without a ring %. `usedTokens` includes output tokens, so the ring % is a slight over-estimate of the TUI's `W11k`/`3.0%` (which exclude output) — an accepted proxy, consistent with Codex's `usage.last.totalTokens`. The provider-status probes (`pi --list-models`, OMP's status-time `get_available_models`) stay untouched.
+5. **Cost.** New optional `costUsd` on `ThreadTokenUsageSnapshot` (additive contract change). The web meter popover renders it generically when present — so it lights up for Claude later without web work. At settle, the turn's summed cost also fills the existing `TurnCompletedPayload.totalCostUsd` (Claude already fills it), keeping turn-level cost populated for every provider that reports cost. Claude itself is unchanged: its per-snapshot cost derivation needs a pricing table and is out of scope.
+
+## Considered options (rejected)
+
+- **Full Pi-TUI status-line parity** (`↑↓` tokens, `CH` cache-hit %, `W` words/context, cost) as a new UI component — a component nobody else has, built for one provider family; deferred. Cache-hit % has no home in the existing meter.
+- **Contract-level `ServerProviderModel.contextWindow`** — a bigger cross-provider model-catalog move that would also rescue OpenCode's parsed-then-dropped `limit.context`; kept as a separate pass, not this change.
+- **`turn.completed.totalCostUsd` as the only cost channel** — turn-level and unrendered; it does not ride the meter pipeline.
+- **Summing raw `totalTokens` per request for `totalProcessedTokens`** — double-counts the cached context on every request; rejected in favor of accumulating `input+output`.
+- **Claude per-snapshot cost in the same change** — requires deriving cost from SDK usage plus model pricing; scope creep.
+
+## Consequences
+
+- Two cost fields are now populated for Pi/OMP: per-request `costUsd` on snapshots and turn-summed `totalCostUsd` on `turn.completed` — a documented split (per-request vs turn-level), both backed by the same wire `cost.total`.
+- The meter's ring % and "total processed" line for Pi/OMP are documented approximations (proxy `usedTokens`, `input+output` accumulation) rather than provider-reported truth.
+- Providers that report no cost (Cursor, Grok, OpenCode today) show no cost line; the render is generic, so the line appears for any provider that fills `costUsd`.
+- The adapter-internal model table lives at the adapter boundary, where provider-shaped behavior belongs; if the catalog move to `ServerProviderModel` ever lands, the lookup relocates without contract churn for this feature.
+- The first usage emission per session waits on one `get_available_models` round trip (~100 ms in-process); a hung child blocks it until the command timeout, at which point the table degrades to empty — acceptable for an already-broken session.

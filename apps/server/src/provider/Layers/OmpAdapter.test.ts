@@ -4149,4 +4149,125 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
     }),
   );
+
+  it.effect(
+    "emits token usage per assistant message_end and the turn cost at terminal agent_end",
+    () =>
+      Effect.gen(function* () {
+        const state = yield* makeScriptedState((command) => {
+          switch (command.type) {
+            case "set_subagent_subscription":
+              return [reply(command)];
+            case "get_state":
+              return [
+                reply(command, {
+                  data: {
+                    sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                    sessionId: "thread-1",
+                    isStreaming: false,
+                  },
+                }),
+              ];
+            case "get_available_models":
+              return [
+                reply(command, {
+                  data: {
+                    models: [
+                      { id: "deepseek-v4-flash", provider: "opencode-go", contextWindow: 1000000 },
+                    ],
+                  },
+                }),
+              ];
+            case "prompt":
+              return [
+                reply(command, { data: { agentInvoked: true } }),
+                { type: "message_start", message: { role: "assistant" } },
+                {
+                  type: "message_end",
+                  message: {
+                    role: "assistant",
+                    provider: "opencode-go",
+                    model: "deepseek-v4-flash",
+                    usage: {
+                      input: 5772,
+                      output: 29,
+                      cacheRead: 17280,
+                      cacheWrite: 0,
+                      totalTokens: 23081,
+                      reasoningTokens: 27,
+                      cost: {
+                        input: 0.00080808,
+                        output: 0.00000812,
+                        cacheRead: 0.000048384,
+                        cacheWrite: 0,
+                        total: 0.000864584,
+                      },
+                    },
+                  },
+                  duration: 3036.576917,
+                  ttft: 25,
+                },
+                { type: "agent_end", isTerminal: true },
+              ];
+            case "get_branch_messages":
+              return [reply(command, { data: { entries: [] } })];
+            case "abort":
+              return [reply(command)];
+            default:
+              throw new Error(`unexpected command: ${command.type}`);
+          }
+        });
+        const spawner = makeScriptedSpawner(state);
+
+        const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+          Effect.provide(testLayer(spawner)),
+        );
+
+        const settled = yield* Deferred.make<undefined>();
+        const collector = yield* collectEventsUntil({
+          stream: adapter.streamEvents,
+          signals: { settled },
+          matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+        });
+
+        yield* adapter.startSession({
+          threadId,
+          provider: PROVIDER,
+          providerInstanceId: instanceId,
+          cwd: "/tmp/omp-project",
+          modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+          runtimeMode: "full-access",
+        });
+        yield* adapter.sendTurn({ threadId, input: "hi" });
+        yield* Deferred.await(settled);
+        const events = yield* Ref.get(collector.events);
+
+        const usageEvents = events.filter((event) => event.type === "thread.token-usage.updated");
+        expect(usageEvents).toHaveLength(1);
+        if (usageEvents[0]?.type === "thread.token-usage.updated") {
+          expect(usageEvents[0].payload.usage).toEqual({
+            usedTokens: 23081,
+            totalProcessedTokens: 5801,
+            maxTokens: 1000000,
+            inputTokens: 5772,
+            cachedInputTokens: 17280,
+            outputTokens: 29,
+            reasoningOutputTokens: 27,
+            durationMs: 3037,
+            costUsd: 0.000864584,
+            compactsAutomatically: true,
+          });
+        }
+
+        const completed = events.find((event) => event.type === "turn.completed");
+        expect(completed?.type).toBe("turn.completed");
+        if (completed?.type === "turn.completed") {
+          expect(completed.payload.state).toBe("completed");
+          expect(completed.payload.totalCostUsd).toBeCloseTo(0.000864584, 10);
+        }
+
+        yield* adapter.stopAll();
+        yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+      }),
+  );
 });

@@ -1,5 +1,9 @@
 import { cn } from "~/lib/utils";
-import { type ContextWindowSnapshot, formatContextWindowTokens } from "~/lib/contextWindow";
+import {
+  type ContextWindowSnapshot,
+  formatContextWindowTokens,
+  formatCostUsd,
+} from "~/lib/contextWindow";
 import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 
 function formatPercentage(value: number | null): string | null {
@@ -125,6 +129,14 @@ export function ContextWindowMeter(props: {
               <span className="text-muted-foreground/60">Total processed</span>
               <span className="font-medium tabular-nums text-muted-foreground/80">
                 {formatContextWindowTokens(totalProcessedTokens)}
+              </span>
+            </div>
+          ) : null}
+          {usage.costUsd != null && usage.costUsd > 0 ? (
+            <div className="flex items-center justify-between gap-3 text-[11px] leading-4">
+              <span className="text-muted-foreground/60">Cost</span>
+              <span className="font-medium tabular-nums text-muted-foreground/80">
+                {formatCostUsd(usage.costUsd)}
               </span>
             </div>
           ) : null}

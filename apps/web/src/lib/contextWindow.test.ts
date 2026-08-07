@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vite-plus/test";
 import { EventId, type OrchestrationThreadActivity, TurnId } from "@t3tools/contracts";
 
-import { deriveLatestContextWindowSnapshot, formatContextWindowTokens } from "./contextWindow";
+import {
+  deriveLatestContextWindowSnapshot,
+  formatContextWindowTokens,
+  formatCostUsd,
+} from "./contextWindow";
 
 function makeActivity(id: string, kind: string, payload: unknown): OrchestrationThreadActivity {
   return {
@@ -80,5 +84,35 @@ describe("contextWindow", () => {
 
     expect(snapshot?.usedTokens).toBe(81_659);
     expect(snapshot?.totalProcessedTokens).toBe(748_126);
+  });
+
+  it("passes costUsd through when the provider reports it", () => {
+    const snapshot = deriveLatestContextWindowSnapshot([
+      makeActivity("activity-1", "context-window.updated", {
+        usedTokens: 14_793,
+        maxTokens: 372_000,
+        costUsd: 0.09257125,
+      }),
+    ]);
+
+    expect(snapshot?.costUsd).toBeCloseTo(0.09257125, 10);
+    expect(
+      deriveLatestContextWindowSnapshot([
+        makeActivity("activity-2", "context-window.updated", {
+          usedTokens: 14_793,
+        }),
+      ])?.costUsd,
+    ).toBeNull();
+  });
+
+  it("formats USD costs like the Pi TUI status line", () => {
+    expect(formatCostUsd(0.07)).toBe("$0.070");
+    expect(formatCostUsd(0.09257125)).toBe("$0.093");
+    expect(formatCostUsd(1.5)).toBe("$1.50");
+    expect(formatCostUsd(12.345)).toBe("$12.35");
+    expect(formatCostUsd(123.456)).toBe("$123.5");
+    expect(formatCostUsd(0)).toBeNull();
+    expect(formatCostUsd(null)).toBeNull();
+    expect(formatCostUsd(undefined)).toBeNull();
   });
 });

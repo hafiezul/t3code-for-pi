@@ -878,6 +878,158 @@ describe("makePiAdapter — scripted RPC process", () => {
     }),
   );
 
+  it.effect("emits token usage per assistant message_end and the turn cost at settle", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_steering_mode":
+          case "set_follow_up_mode":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/pi/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "get_available_models":
+            return [
+              reply(command, {
+                data: {
+                  models: [
+                    { id: "claude-sonnet-4-6", provider: "anthropic", contextWindow: 200000 },
+                  ],
+                },
+              }),
+            ];
+          case "prompt":
+            // Two assistant messages (tool-call style turn): each
+            // message_end carries that request's final usage.
+            return [
+              reply(command),
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_end",
+                message: {
+                  role: "assistant",
+                  provider: "anthropic",
+                  model: "claude-sonnet-4-6",
+                  usage: {
+                    input: 100,
+                    output: 20,
+                    cacheRead: 900,
+                    cacheWrite: 0,
+                    reasoning: 5,
+                    totalTokens: 1025,
+                    cost: {
+                      input: 0.001,
+                      output: 0.002,
+                      cacheRead: 0,
+                      cacheWrite: 0,
+                      total: 0.003,
+                    },
+                  },
+                },
+              },
+              { type: "message_start", message: { role: "assistant" } },
+              {
+                type: "message_end",
+                message: {
+                  role: "assistant",
+                  provider: "anthropic",
+                  model: "claude-sonnet-4-6",
+                  usage: {
+                    input: 50,
+                    output: 30,
+                    cacheRead: 1000,
+                    cacheWrite: 0,
+                    reasoning: 2,
+                    totalTokens: 1082,
+                    cost: {
+                      input: 0.0005,
+                      output: 0.003,
+                      cacheRead: 0,
+                      cacheWrite: 0,
+                      total: 0.0035,
+                    },
+                  },
+                },
+              },
+              { type: "agent_settled" },
+            ];
+          case "get_entries":
+            return [reply(command, { data: { entries: [], leafId: "leaf-1" } })];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makePiAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const settled = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { settled },
+        matches: (event) => (event.type === "turn.completed" ? "settled" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/pi-project",
+        modelSelection: { instanceId, model: "anthropic/claude-sonnet-4-6" },
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "hi" });
+      yield* Deferred.await(settled);
+      const events = yield* Ref.get(collector.events);
+
+      const usageEvents = events.filter((event) => event.type === "thread.token-usage.updated");
+      expect(usageEvents).toHaveLength(2);
+      if (usageEvents[0]?.type === "thread.token-usage.updated") {
+        expect(usageEvents[0].payload.usage).toEqual({
+          usedTokens: 1025,
+          totalProcessedTokens: 120,
+          maxTokens: 200000,
+          inputTokens: 100,
+          cachedInputTokens: 900,
+          outputTokens: 20,
+          reasoningOutputTokens: 5,
+          costUsd: 0.003,
+          compactsAutomatically: true,
+        });
+      }
+      // The second message accumulates processed tokens and the turn cost.
+      if (usageEvents[1]?.type === "thread.token-usage.updated") {
+        expect(usageEvents[1].payload.usage).toMatchObject({
+          usedTokens: 1082,
+          totalProcessedTokens: 200,
+          maxTokens: 200000,
+          costUsd: 0.0035,
+        });
+      }
+
+      const completed = events.find((event) => event.type === "turn.completed");
+      expect(completed?.type).toBe("turn.completed");
+      if (completed?.type === "turn.completed") {
+        expect(completed.payload.state).toBe("completed");
+        expect(completed.payload.totalCostUsd).toBeCloseTo(0.0065, 10);
+      }
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
   it.effect(
     "completes extension-command turns that pi never settles, surfacing command output",
     () =>
