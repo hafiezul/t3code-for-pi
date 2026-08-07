@@ -280,6 +280,8 @@ type OmpUiRequest =
   | {
       readonly method: "select";
       readonly id: ApprovalRequestId;
+      /** Dialog title. The Ask tool puts the model's question here. */
+      readonly title?: string | undefined;
       readonly options: ReadonlyArray<string>;
     }
   | { readonly method: "confirm"; readonly id: ApprovalRequestId }
@@ -626,19 +628,44 @@ function isApprovalDialog(options: ReadonlyArray<string>): boolean {
   );
 }
 
-/** Map a `select`/`confirm` extension dialog onto T3 user-input questions. */
+/**
+ * Map a `select`/`confirm` extension dialog onto T3 user-input questions.
+ * OMP's Ask tool has no rich dialog over rpc-ui, so it degrades to one
+ * `select` per question whose `title` IS the model's question — carry it
+ * through or the card renders a prompt with no question in it.
+ */
 export function ompUiRequestToQuestions(
   request: Extract<OmpUiRequest, { method: "select" }>,
 ): ReadonlyArray<UserInputQuestion> {
+  const title = request.title?.trim();
+  const fallback = request.options.length > 0 ? "Select an option" : "OMP extension request";
   return [
     {
       id: request.id,
       header: "OMP extension",
-      question: request.options.length > 0 ? "Select an option" : "OMP extension request",
+      question: title !== undefined && title.length > 0 ? title : fallback,
       options: request.options.map((option) => ({ label: option, description: option })),
       multiSelect: false,
     },
   ];
+}
+
+/**
+ * The user-facing text of an extension dialog, or `undefined` when it has
+ * none. `promptStyle` marks a title OMP already rendered for a terminal —
+ * the question, then a redraw of the option rows the user just left. T3's
+ * card draws its own input, so only the first line survives.
+ */
+function ompDialogTitle(event: OmpRpcEvent): string | undefined {
+  const title = typeof event.title === "string" ? event.title.trim() : "";
+  if (title.length === 0) {
+    return undefined;
+  }
+  if (event.promptStyle !== true) {
+    return title;
+  }
+  const firstLine = title.split("\n", 1)[0]?.trim();
+  return firstLine !== undefined && firstLine.length > 0 ? firstLine : undefined;
 }
 
 function mapOmpRequestError(method: string, error: unknown): ProviderAdapterError {
@@ -891,14 +918,12 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
       const options = Array.isArray(event.options)
         ? event.options.filter((option): option is string => typeof option === "string")
         : [];
+      const title = ompDialogTitle(event);
       const requestId = ApprovalRequestId.make(id);
       // ADR 0001 decision 4: a `select` with exactly ["Approve","Deny"] is
       // an approval, not a user-input question.
       if (isApprovalDialog(options)) {
-        const detail =
-          typeof event.title === "string" && event.title.trim().length > 0
-            ? event.title.trim()
-            : "Approve tool execution";
+        const detail = title ?? "Approve tool execution";
         if (yield* Ref.get(context.denyPendingSelects)) {
           // The model retries after a Deny; keep the turn moving instead of
           // surfacing a dialog the user already answered.
@@ -924,6 +949,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
       const request: Extract<OmpUiRequest, { method: "select" }> = {
         method: "select",
         id: requestId,
+        ...(title !== undefined ? { title } : {}),
         options,
       };
       context.pendingUiRequests.set(requestId, request);
@@ -962,7 +988,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
             {
               id: requestId,
               header: "OMP extension",
-              question: typeof event.title === "string" ? event.title : "Confirm",
+              question: ompDialogTitle(event) ?? "Confirm",
               options: [
                 { label: "Yes", description: "Confirm" },
                 { label: "No", description: "Cancel" },
@@ -982,10 +1008,7 @@ export const makeOmpAdapter = Effect.fn("makeOmpAdapter")(function* (
         id: requestId,
       };
       context.pendingUiRequests.set(requestId, request);
-      const title =
-        typeof event.title === "string" && event.title.trim().length > 0
-          ? event.title.trim()
-          : "OMP extension request";
+      const title = ompDialogTitle(event) ?? "OMP extension request";
       const placeholder =
         typeof event.placeholder === "string" && event.placeholder.trim().length > 0
           ? event.placeholder.trim()

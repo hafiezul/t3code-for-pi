@@ -232,6 +232,8 @@ type PiUiRequest =
   | {
       readonly method: "select";
       readonly id: ApprovalRequestId;
+      /** Dialog title. The Ask tool puts the model's question here. */
+      readonly title?: string | undefined;
       readonly options: ReadonlyArray<string>;
     }
   | { readonly method: "confirm"; readonly id: ApprovalRequestId }
@@ -661,19 +663,44 @@ export function mapPiEvent(
   }
 }
 
-/** Map a `select`/`confirm` extension dialog onto T3 user-input questions. */
+/**
+ * Map a `select`/`confirm` extension dialog onto T3 user-input questions.
+ * pi's Ask tool has no rich dialog over the rpc UI, so it degrades to one
+ * `select` per question whose `title` IS the model's question — carry it
+ * through or the card renders a prompt with no question in it.
+ */
 export function piUiRequestToQuestions(
   request: Extract<PiUiRequest, { method: "select" }>,
 ): ReadonlyArray<UserInputQuestion> {
+  const title = request.title?.trim();
+  const fallback = request.options.length > 0 ? "Select an option" : "Pi extension request";
   return [
     {
       id: request.id,
       header: "Pi extension",
-      question: request.options.length > 0 ? "Select an option" : "Pi extension request",
+      question: title !== undefined && title.length > 0 ? title : fallback,
       options: request.options.map((option) => ({ label: option, description: option })),
       multiSelect: false,
     },
   ];
+}
+
+/**
+ * The user-facing text of an extension dialog, or `undefined` when it has
+ * none. `promptStyle` marks a title pi already rendered for a terminal —
+ * the question, then a redraw of the option rows the user just left. T3's
+ * card draws its own input, so only the first line survives.
+ */
+function piDialogTitle(event: PiRpcEvent): string | undefined {
+  const title = typeof event.title === "string" ? event.title.trim() : "";
+  if (title.length === 0) {
+    return undefined;
+  }
+  if (event.promptStyle !== true) {
+    return title;
+  }
+  const firstLine = title.split("\n", 1)[0]?.trim();
+  return firstLine !== undefined && firstLine.length > 0 ? firstLine : undefined;
 }
 
 function mapPiRequestError(method: string, error: unknown): ProviderAdapterError {
@@ -921,9 +948,11 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
       const options = Array.isArray(event.options)
         ? event.options.filter((option): option is string => typeof option === "string")
         : [];
+      const title = piDialogTitle(event);
       const request: Extract<PiUiRequest, { method: "select" }> = {
         method: "select",
         id: requestId,
+        ...(title !== undefined ? { title } : {}),
         options,
       };
       context.pendingUiRequests.set(requestId, request);
@@ -961,7 +990,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
             {
               id: requestId,
               header: "Pi extension",
-              question: typeof event.title === "string" ? event.title : "Confirm",
+              question: piDialogTitle(event) ?? "Confirm",
               options: [
                 { label: "Yes", description: "Confirm" },
                 { label: "No", description: "Cancel" },
@@ -984,10 +1013,7 @@ export const makePiAdapter = Effect.fn("makePiAdapter")(function* (
         id: requestId,
       };
       context.pendingUiRequests.set(requestId, request);
-      const title =
-        typeof event.title === "string" && event.title.trim().length > 0
-          ? event.title.trim()
-          : "Pi extension request";
+      const title = piDialogTitle(event) ?? "Pi extension request";
       const placeholder =
         typeof event.placeholder === "string" && event.placeholder.trim().length > 0
           ? event.placeholder.trim()

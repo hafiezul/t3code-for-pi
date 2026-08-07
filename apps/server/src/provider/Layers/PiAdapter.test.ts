@@ -212,19 +212,29 @@ describe("piUiRequestToQuestions", () => {
     const questions = piUiRequestToQuestions({
       method: "select",
       id: ApprovalRequestId.make("req-1"),
+      title: "Allow dangerous command?",
       options: ["Allow", "Block"],
     });
     expect(questions).toHaveLength(1);
     expect(questions[0]).toEqual({
       id: "req-1",
       header: "Pi extension",
-      question: "Select an option",
+      question: "Allow dangerous command?",
       options: [
         { label: "Allow", description: "Allow" },
         { label: "Block", description: "Block" },
       ],
       multiSelect: false,
     });
+  });
+
+  it("falls back to a generic prompt when the dialog carries no title", () => {
+    const questions = piUiRequestToQuestions({
+      method: "select",
+      id: ApprovalRequestId.make("req-1"),
+      options: ["Allow", "Block"],
+    });
+    expect(questions[0]?.question).toBe("Select an option");
   });
 });
 
@@ -1478,7 +1488,10 @@ describe("makePiAdapter — scripted RPC process", () => {
           Effect.map((events) => events.find((event) => event.type === "user-input.requested")),
         );
         expect(uiRequestedEvent).toBeDefined();
-        const uiPayload = uiRequestedEvent!.payload as { questions: ReadonlyArray<{ id: string }> };
+        const uiPayload = uiRequestedEvent!.payload as {
+          questions: ReadonlyArray<{ id: string; question: string }>;
+        };
+        expect(uiPayload.questions[0]!.question).toBe("Allow dangerous command?");
         const questionId = uiPayload.questions[0]!.id;
         const answerRequestId = ApprovalRequestId.make(questionId);
         yield* adapter.respondToUserInput(threadId, answerRequestId, {

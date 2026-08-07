@@ -212,13 +212,14 @@ describe("ompUiRequestToQuestions", () => {
       ompUiRequestToQuestions({
         method: "select",
         id: ApprovalRequestId.make("d1"),
+        title: "Which scope should this change cover?",
         options: ["A", "B"],
       }),
     ).toEqual([
       {
         id: ApprovalRequestId.make("d1"),
         header: "OMP extension",
-        question: "Select an option",
+        question: "Which scope should this change cover?",
         options: [
           { label: "A", description: "A" },
           { label: "B", description: "B" },
@@ -226,6 +227,16 @@ describe("ompUiRequestToQuestions", () => {
         multiSelect: false,
       },
     ]);
+  });
+
+  it("falls back to a generic prompt when the dialog carries no title", () => {
+    expect(
+      ompUiRequestToQuestions({
+        method: "select",
+        id: ApprovalRequestId.make("d1"),
+        options: ["A", "B"],
+      })[0]?.question,
+    ).toBe("Select an option");
   });
 });
 
@@ -1252,9 +1263,10 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       );
       expect(uiRequestedEvent).toBeDefined();
       const uiPayload = uiRequestedEvent!.payload as {
-        questions: ReadonlyArray<{ id: string }>;
+        questions: ReadonlyArray<{ id: string; question: string }>;
       };
       expect(uiPayload.questions[0]!.id).toBe("dialog-1");
+      expect(uiPayload.questions[0]!.question).toBe("Pick one");
 
       yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("dialog-1"), {
         "dialog-1": "A",
@@ -1263,6 +1275,94 @@ describe("makeOmpAdapter — scripted RPC process", () => {
       expect(uiResponse.type).toBe("extension_ui_response");
       expect(uiResponse.id).toBe("dialog-1");
       expect(uiResponse.value).toBe("A");
+
+      yield* adapter.stopAll();
+      yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
+    }),
+  );
+
+  // The Ask tool's "Other (type your own)" branch reopens the same question
+  // as a promptStyle editor whose title is the terminal redraw of the option
+  // rows. The card must show the question, not the redraw.
+  it.effect("collapses a promptStyle editor title to its question line", () =>
+    Effect.gen(function* () {
+      const state = yield* makeScriptedState((command) => {
+        switch (command.type) {
+          case "set_subagent_subscription":
+            return [reply(command)];
+          case "get_state":
+            return [
+              reply(command, {
+                data: {
+                  sessionFile: "/tmp/t3/omp/sessions/x/thread-1.jsonl",
+                  sessionId: "thread-1",
+                  isStreaming: false,
+                },
+              }),
+            ];
+          case "prompt":
+            return [
+              reply(command, { data: { agentInvoked: true } }),
+              {
+                type: "extension_ui_request",
+                id: "ui-editor-prompt-1",
+                method: "editor",
+                title:
+                  "Which color should the button be?\n\n○ Red\n○ Blue\n◉ Other (type your own)\n\nEnter your response:",
+                promptStyle: true,
+              },
+            ];
+          case "extension_ui_response":
+            return [];
+          case "abort":
+            return [reply(command)];
+          default:
+            throw new Error(`unexpected command: ${command.type}`);
+        }
+      });
+      const spawner = makeScriptedSpawner(state);
+
+      const adapter = yield* makeOmpAdapter(decodeSettings(), { instanceId }).pipe(
+        Effect.provide(testLayer(spawner)),
+      );
+
+      const uiRequested = yield* Deferred.make<undefined>();
+      const collector = yield* collectEventsUntil({
+        stream: adapter.streamEvents,
+        signals: { uiRequested },
+        matches: (event) => (event.type === "user-input.requested" ? "uiRequested" : undefined),
+      });
+
+      yield* adapter.startSession({
+        threadId,
+        provider: PROVIDER,
+        providerInstanceId: instanceId,
+        cwd: "/tmp/omp-project",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+        runtimeMode: "full-access",
+      });
+      yield* nextCommand(state);
+      yield* nextCommand(state);
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "do the thing",
+        modelSelection: { instanceId, model: "opencode-go/deepseek-v4-flash" },
+      });
+      yield* nextCommand(state);
+
+      yield* Deferred.await(uiRequested);
+      const uiRequestedEvent = yield* Ref.get(collector.events).pipe(
+        Effect.map((events) => events.find((event) => event.type === "user-input.requested")),
+      );
+      expect(uiRequestedEvent).toBeDefined();
+      const uiPayload = uiRequestedEvent!.payload as {
+        questions: ReadonlyArray<{ question: string; answerKind?: string }>;
+      };
+      expect(uiPayload.questions[0]).toMatchObject({
+        question: "Which color should the button be?",
+        answerKind: "editor",
+      });
 
       yield* adapter.stopAll();
       yield* Fiber.interrupt(collector.fiber).pipe(Effect.ignore);
@@ -1820,8 +1920,7 @@ describe("makeOmpAdapter — scripted RPC process", () => {
         throw new Error("expected user-input.requested");
       }
       expect(uiRequestedEvent.payload.questions[0]).toMatchObject({
-        // Same generic question text as the pi adapter's select mapping.
-        question: "Select an option",
+        question: "How should I proceed?",
         options: [
           { label: "Approve", description: "Approve" },
           { label: "Deny", description: "Deny" },
