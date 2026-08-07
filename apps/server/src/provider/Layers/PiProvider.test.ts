@@ -11,6 +11,7 @@ import {
   checkPiProviderStatus,
   flattenPiCommands,
   flattenPiModels,
+  hasPiModelTableHeader,
   MINIMUM_PI_VERSION,
   parsePiCommands,
   parsePiModelTable,
@@ -76,6 +77,20 @@ describe("parsePiModelTable", () => {
       { provider: "anthropic", model: "claude-haiku-4-5", thinking: true },
       { provider: "cloudflare-workers-ai", model: "@cf/moonshotai/kimi-k2.6", thinking: false },
     ]);
+  });
+
+  it("detects the table header independently of the rows", () => {
+    expect(hasPiModelTableHeader("provider  model  context  max-out  thinking  images\n")).toBe(
+      true,
+    );
+    // Indented header: still a readable table, matching the row parser.
+    expect(hasPiModelTableHeader("  provider  model  context  max-out  thinking  images\n")).toBe(
+      true,
+    );
+    expect(hasPiModelTableHeader("")).toBe(false);
+    expect(hasPiModelTableHeader("Available models:\n- anthropic/claude-sonnet-4-6\n")).toBe(false);
+    // Truncated mid-header — no complete header row, so unreadable.
+    expect(hasPiModelTableHeader("provider\n")).toBe(false);
   });
 
   it("flattens rows into provider/model slugs split at the FIRST slash only", () => {
@@ -220,6 +235,7 @@ describe("checkPiProviderStatus", () => {
     expect(snapshot.version).toBe("0.83.0");
     expect(snapshot.status).toBe("ready");
     expect(snapshot.auth).toEqual({ status: "unknown" });
+    expect(snapshot.message).toBe("2 models available through Pi.");
     expect((snapshot.models ?? []).map((model) => model.slug)).toEqual([
       "anthropic/claude-sonnet-4-6",
       "openai/gpt-5.6",
@@ -271,6 +287,37 @@ describe("checkPiProviderStatus", () => {
     expect(snapshot.installed).toBe(true);
     expect(snapshot.status).toBe("warning");
     expect(snapshot.message).toMatch(/did not report any available models/);
+    expect(snapshot.message).toMatch(/API keys/);
+  });
+
+  it("warns that the inventory is unreadable when the output parses to no rows", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) =>
+        args.includes("--version")
+          ? makeStdoutHandle("0.83.0\n")
+          : // A format change (or truncated output) that exits 0 but carries
+            // no recognisable table — not an empty catalog.
+            makeStdoutHandle("Available models:\n- anthropic/claude-sonnet-4-6\n"),
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toMatch(/model inventory could not be read/);
+    expect(snapshot.message).not.toMatch(/API keys/);
+  });
+
+  it("warns that the inventory is unreadable when --list-models exits non-zero", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) =>
+        args.includes("--version") ? makeStdoutHandle("0.83.0\n") : makeStdoutHandle("", 1),
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toMatch(/model inventory could not be read/);
+    expect(snapshot.message).not.toMatch(/API keys/);
   });
 
   it("reports disabled without spawning", async () => {

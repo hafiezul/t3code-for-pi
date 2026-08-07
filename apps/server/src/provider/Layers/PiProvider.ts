@@ -83,6 +83,24 @@ export function parsePiModelTable(stdout: string): ReadonlyArray<PiModelTableRow
 }
 
 /**
+ * Whether the output carries the `--list-models` header row. A run that
+ * exits 0 with a header but no data rows is a genuinely empty catalog (pi
+ * auth-filters the table); a run with no header at all could not be read —
+ * pi changed its output format, or the output was truncated.
+ */
+export function hasPiModelTableHeader(stdout: string): boolean {
+  return stdout.split("\n").some((line) => {
+    // Tokenize exactly like parsePiModelTableRow so an indented or
+    // truncated header can never be read differently from its rows.
+    const tokens = line
+      .split(/\s{2,}/)
+      .map((token) => token.trim())
+      .filter((token) => token.length > 0);
+    return tokens.length >= 2 && tokens[0] === "provider";
+  });
+}
+
+/**
  * pi's universal thinking levels (`--thinking`). Models map unsupported
  * levels to their nearest supported one (pi clamps, e.g. `low` → `high` on
  * models whose `thinkingLevelMap` has no low tier), so the full set is safe
@@ -459,12 +477,17 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
     return fallback(Cause.squash(inventoryExit.cause), version);
   }
 
+  const inventoryStdout = inventoryExit.value.stdout;
   const models = providerModelsFromSettings(
-    flattenPiModels(parsePiModelTable(inventoryExit.value.stdout)),
+    flattenPiModels(parsePiModelTable(inventoryStdout)),
     customModels,
     DEFAULT_PI_MODEL_CAPABILITIES,
   );
   const availableCount = models.filter((model) => !model.isCustom).length;
+  // Zero rows has two causes with opposite remedies: an unreadable table
+  // (no header — a pi format change or truncated output) points at the pi
+  // version, an empty-but-readable table points at the user's API keys.
+  const inventoryUnreadable = availableCount === 0 && !hasPiModelTableHeader(inventoryStdout);
 
   // Command inventory: enrichment. Any failure or timeout degrades to an
   // empty list — the snapshot stays "ready" from the models probe above.
@@ -486,7 +509,9 @@ export const checkPiProviderStatus = Effect.fn("checkPiProviderStatus")(function
       message:
         availableCount > 0
           ? `${availableCount} model${availableCount === 1 ? "" : "s"} available through Pi.`
-          : "Pi is available, but it did not report any available models. Check your API keys in `~/.pi/agent/models.json`.",
+          : inventoryUnreadable
+            ? "Pi is available, but its model inventory could not be read. Check that your installed Pi version is supported."
+            : "Pi is available, but it did not report any available models. Check your API keys in `~/.pi/agent/models.json`.",
     },
   });
 });
