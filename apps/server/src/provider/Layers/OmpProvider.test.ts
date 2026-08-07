@@ -1,8 +1,11 @@
 import * as PlatformError from "effect/PlatformError";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 import { describe, expect, it } from "@effect/vitest";
 import { OmpSettings } from "@t3tools/contracts";
@@ -41,6 +44,23 @@ const makeStdoutHandle = (stdout: string, exitCode = 0) =>
     unref: Effect.succeed(Effect.void),
     stdin: Sink.drain,
     stdout: Stream.encodeText(Stream.make(stdout)),
+    stderr: Stream.empty,
+    all: Stream.empty,
+    getInputFd: () => Sink.drain,
+    getOutputFd: () => Stream.empty,
+  });
+
+/** A probe child that never emits and never exits — used to drive the
+ *  bounded probe timeout under `TestClock`. */
+const makeHangingHandle = () =>
+  ChildProcessSpawner.makeHandle({
+    pid: ChildProcessSpawner.ProcessId(1),
+    exitCode: Effect.never,
+    isRunning: Effect.succeed(true),
+    kill: () => Effect.void,
+    unref: Effect.succeed(Effect.void),
+    stdin: Sink.drain,
+    stdout: Stream.fromEffect(Effect.never),
     stderr: Stream.empty,
     all: Stream.empty,
     getInputFd: () => Sink.drain,
@@ -332,19 +352,111 @@ describe("checkOmpProviderStatus", () => {
     );
   });
 
-  it("degrades to a warning when the model catalog probe fails", async () => {
+  it("reports a model catalog probe that exits abnormally as a probe failure", async () => {
+    let rpcCalls = 0;
     const spawner = makeScriptedSpawner({
       onArgs: (args) => {
         if (args[0] === "--version") {
           return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
         }
+        rpcCalls += 1;
         return makeStdoutHandle("", 1);
       },
     });
 
     const snapshot = await runProbe(spawner);
     expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toContain("model catalog probe did not complete");
+    expect(snapshot.message).not.toContain("API keys");
+    expect(snapshot.models).toHaveLength(0);
+    // A failed catalog probe must still leave a usable provider snapshot —
+    // installed, versioned, and with the command inventory still attempted.
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.version).toBe(MINIMUM_OMP_VERSION);
+    expect(rpcCalls).toBe(2);
+    expect(snapshot.slashCommands).toEqual([]);
+  });
+
+  it("reports a model catalog probe that fails to spawn as a probe failure", async () => {
+    const spawner = ChildProcessSpawner.make((command) => {
+      if (!ChildProcess.isStandardCommand(command)) {
+        return Effect.die(new Error("expected a standard omp command"));
+      }
+      return command.args[0] === "--version"
+        ? Effect.sync(() => makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`))
+        : Effect.fail(
+            new PlatformError.PlatformError(
+              new PlatformError.SystemError({
+                _tag: "PermissionDenied",
+                module: "test",
+                method: "spawn",
+              }),
+            ),
+          );
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.status).toBe("warning");
+    expect(snapshot.message).toContain("model catalog probe did not complete");
+    expect(snapshot.message).not.toContain("API keys");
+    expect(snapshot.installed).toBe(true);
+    expect(snapshot.version).toBe(MINIMUM_OMP_VERSION);
+  });
+
+  it("reports a timed-out model catalog probe as a timeout, not missing API keys", () =>
+    Effect.gen(function* () {
+      let rpcCalls = 0;
+      const spawner = makeScriptedSpawner({
+        onArgs: (args) => {
+          if (args[0] === "--version") {
+            return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+          }
+          rpcCalls += 1;
+          // Only the models probe hangs; the commands probe answers at once.
+          return rpcCalls === 1 ? makeHangingHandle() : makeStdoutHandle("", 0);
+        },
+      });
+
+      const fiber = yield* checkOmpProviderStatus(
+        decodeSettings(),
+        "/tmp/omp-probe-test",
+        undefined,
+      ).pipe(
+        Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust(Duration.minutes(5));
+      const snapshot = yield* Fiber.join(fiber);
+
+      expect(snapshot.status).toBe("warning");
+      expect(snapshot.message).toContain("model catalog probe timed out");
+      expect(snapshot.message).not.toContain("API keys");
+      expect(snapshot.installed).toBe(true);
+      expect(snapshot.version).toBe(MINIMUM_OMP_VERSION);
+      expect(snapshot.models).toHaveLength(0);
+    }).pipe(Effect.provide(TestClock.layer()), Effect.runPromise));
+
+  it("keeps the API-key advice when the catalog probe succeeds with zero models", async () => {
+    const spawner = makeScriptedSpawner({
+      onArgs: (args) => {
+        if (args[0] === "--version") {
+          return makeStdoutHandle(`omp ${MINIMUM_OMP_VERSION}\n`);
+        }
+        return makeStdoutHandle(
+          JSON.stringify({
+            type: "response",
+            command: "get_available_models",
+            success: true,
+            data: { models: [] },
+          }) + "\n",
+        );
+      },
+    });
+
+    const snapshot = await runProbe(spawner);
+    expect(snapshot.status).toBe("warning");
     expect(snapshot.message).toContain("did not report any available models");
+    expect(snapshot.message).toContain("API keys");
     expect(snapshot.models).toHaveLength(0);
   });
 

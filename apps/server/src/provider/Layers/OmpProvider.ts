@@ -344,9 +344,24 @@ export function flattenOmpCommands(
   return commands;
 }
 
+/** Why a bounded RPC catalog probe did not deliver a response. `timeout`
+ *  means the probe was still running when its budget expired; `failed`
+ *  means it could not spawn, errored, or exited abnormally. */
 class OmpRpcProbeError extends Data.TaggedError("OmpRpcProbeError")<{
+  readonly reason: "timeout" | "failed";
   readonly detail: string;
 }> {}
+
+const asOmpRpcProbeError = (cause: unknown): OmpRpcProbeError => {
+  if (cause instanceof OmpRpcProbeError) {
+    return cause;
+  }
+  const detail =
+    cause instanceof Error && cause.message.trim().length > 0
+      ? cause.message.trim()
+      : "Unknown error.";
+  return new OmpRpcProbeError({ reason: "failed", detail });
+};
 
 /** One JSONL command piped into a `--no-session` RPC probe process; the
  *  child answers then exits on stdin EOF. Fixed args only, never user
@@ -371,16 +386,30 @@ const runOmpRpcProbe = (input: {
         },
       }),
     );
-    const [stdout] = yield* Effect.all(
+    const [stdout, exitCode] = yield* Effect.all(
       [collectStreamAsString(child.stdout), child.exitCode.pipe(Effect.map(Number))],
       { concurrency: "unbounded" },
     );
+    if (exitCode !== 0) {
+      return yield* Effect.fail(
+        new OmpRpcProbeError({
+          reason: "failed",
+          detail: `OMP RPC probe exited with status ${exitCode}.`,
+        }),
+      );
+    }
     return stdout;
   }).pipe(
     Effect.scoped,
+    Effect.mapError(asOmpRpcProbeError),
     Effect.timeout(Duration.millis(input.timeoutMs)),
     Effect.catchTag("TimeoutError", () =>
-      Effect.fail(new OmpRpcProbeError({ detail: "OMP RPC probe timed out." })),
+      Effect.fail(
+        new OmpRpcProbeError({
+          reason: "timeout",
+          detail: `OMP RPC probe timed out after ${input.timeoutMs}ms.`,
+        }),
+      ),
     ),
   );
 
@@ -495,7 +524,18 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
 
   // Model catalog: best-effort. A failed or timed-out probe degrades to a
   // warning snapshot — never a failed provider (cold discovery can hang).
+  // The failure reason is kept so the card can name the probe outcome
+  // instead of misdiagnosing it as missing API keys.
   const modelsExit = yield* Effect.exit(runModelProbe());
+  const modelProbeFailure =
+    modelsExit._tag === "Failure" ? asOmpRpcProbeError(Cause.squash(modelsExit.cause)) : undefined;
+  if (modelProbeFailure) {
+    yield* Effect.logWarning("OMP model catalog probe did not complete.", {
+      reason: modelProbeFailure.reason,
+      detail: modelProbeFailure.detail,
+      version,
+    });
+  }
   const modelRows = modelsExit._tag === "Success" ? parseOmpModels(modelsExit.value) : [];
   const models = providerModelsFromSettings(
     flattenOmpModels(modelRows),
@@ -503,6 +543,14 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
     DEFAULT_OMP_MODEL_CAPABILITIES,
   );
   const availableCount = models.filter((model) => !model.isCustom).length;
+
+  const catalogMessage = modelProbeFailure
+    ? modelProbeFailure.reason === "timeout"
+      ? "OMP is available, but the model catalog probe timed out. Models appear once a later probe completes."
+      : "OMP is available, but the model catalog probe did not complete. Models appear once a later probe succeeds."
+    : availableCount > 0
+      ? `${availableCount} model${availableCount === 1 ? "" : "s"} available through OMP.`
+      : "OMP is available, but it did not report any available models. Check your API keys in the OMP settings card.";
 
   // Command inventory: enrichment. Any failure or timeout degrades to an
   // empty list — the snapshot stays at the models probe's status.
@@ -521,10 +569,7 @@ export const checkOmpProviderStatus = Effect.fn("checkOmpProviderStatus")(functi
       version,
       status: availableCount > 0 ? "ready" : "warning",
       auth: { status: "unknown" },
-      message:
-        availableCount > 0
-          ? `${availableCount} model${availableCount === 1 ? "" : "s"} available through OMP.`
-          : "OMP is available, but it did not report any available models. Check your API keys in the OMP settings card.",
+      message: catalogMessage,
     },
   });
 });
